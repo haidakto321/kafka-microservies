@@ -23,6 +23,7 @@ spring:
       acks: all
       properties:
         enable.idempotence: true
+        max.block.ms: 5000            # Kafka down: send() gives up after 5 s (default 60 s); the relay tries again later
     consumer:
       group-id: order-service
       auto-offset-reset: earliest

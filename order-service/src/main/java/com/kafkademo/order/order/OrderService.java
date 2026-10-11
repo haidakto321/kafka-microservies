@@ -1,6 +1,9 @@
 package com.kafkademo.order.order;
 
-import com.kafkademo.order.messaging.CommandPublisher;
+import com.kafkademo.contracts.MessageTypes;
+import com.kafkademo.contracts.Topics;
+import com.kafkademo.contracts.payload.ReserveStock;
+import com.kafkademo.order.outbox.OutboxWriter;
 import com.kafkademo.order.product.ProductClient;
 import com.kafkademo.order.product.ProductInfo;
 import java.time.Clock;
@@ -20,32 +23,34 @@ public class OrderService {
     private final ProductClient productClient;
     private final OrderRepository orders;
     private final TransactionTemplate transactionTemplate;
-    private final CommandPublisher commands;
+    private final OutboxWriter outbox;
     private final Clock clock;
 
     public OrderService(ProductClient productClient, OrderRepository orders, TransactionTemplate transactionTemplate,
-                        CommandPublisher commands, Clock clock) {
+                        OutboxWriter outbox, Clock clock) {
         this.productClient = productClient;
         this.orders = orders;
         this.transactionTemplate = transactionTemplate;
-        this.commands = commands;
+        this.outbox = outbox;
         this.clock = clock;
     }
 
     /**
      * 1. Ask inventory for the price - OUTSIDE any DB transaction (never hold a DB connection during an HTTP call).
-     * 2. Save the order as PENDING - an explicit transaction.
-     * 3. Send ReserveStock.
+     * 2. In ONE transaction: save the order as PENDING and its ReserveStock message (an outbox row).
+     *    Both are saved, or neither. The outbox relay sends the message afterwards, so Kafka can be down
+     *    and the order is still accepted.
      */
     public Order placeOrder(long productId, int quantity) {
         ProductInfo product = productClient.getProduct(productId);
         Order order = Order.place(UUID.randomUUID(), productId, quantity, product.price(), clock.instant());
 
-        Order saved = transactionTemplate.execute(status -> orders.save(order));
-
-        // M1: sent AFTER the commit, not together with it - the "dual write" problem.
-        // If the app crashes right here, the order stays PENDING forever. M2 fixes this with the outbox.
-        commands.reserveStock(saved.getId(), productId, quantity);
+        Order saved = transactionTemplate.execute(status -> {
+            Order created = orders.save(order);
+            outbox.add(Topics.INVENTORY_COMMANDS, created.getId(), MessageTypes.RESERVE_STOCK,
+                    new ReserveStock(productId, quantity));
+            return created;
+        });
         log.info("Order {} placed: {} x product {}, total {}", saved.getId(), quantity, productId, saved.getTotal());
         return saved;
     }

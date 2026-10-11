@@ -33,6 +33,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
@@ -51,6 +52,8 @@ class OrderControllerTest {
     EnvelopeCodec codec;
     @Autowired
     ConsumerFactory<String, String> consumerFactory;
+    @Autowired
+    JdbcTemplate jdbc;
 
     @MockitoBean
     ProductClient productClient;
@@ -108,13 +111,15 @@ class OrderControllerTest {
     @Test
     void anUnknownProductIs400AndSavesNothing() throws Exception {
         when(productClient.getProduct(99L)).thenThrow(new ProductNotFoundException(99L));
-        long before = orders.count();
+        long ordersBefore = orders.count();
+        long messagesBefore = jdbc.queryForObject("SELECT count(*) FROM outbox_event", Long.class);
 
         mvc.perform(post("/orders").contentType(MediaType.APPLICATION_JSON).content("{\"productId\":99,\"quantity\":1}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.detail").value("Product 99 not found"));
 
-        assertThat(orders.count()).isEqualTo(before);
+        assertThat(orders.count()).isEqualTo(ordersBefore);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM outbox_event", Long.class)).isEqualTo(messagesBefore);
     }
 
     private UUID placeOrder(String body) throws Exception {

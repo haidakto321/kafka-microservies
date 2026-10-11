@@ -19,4 +19,10 @@ public class KafkaTopicsConfig {
     NewTopic sagaRepliesTopic() {
         return TopicBuilder.name(Topics.SAGA_REPLIES).partitions(Topics.PARTITIONS).replicas(1).build();
     }
+
+    @Bean
+    NewTopic sagaRepliesDeadLetterTopic() {
+        // Same partition count: a failed record goes to the same partition number in the DLT.
+        return TopicBuilder.name(Topics.SAGA_REPLIES_DLT).partitions(Topics.PARTITIONS).replicas(1).build();
+    }
 }

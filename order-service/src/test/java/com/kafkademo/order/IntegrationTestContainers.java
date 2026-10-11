@@ -20,6 +20,9 @@ public class IntegrationTestContainers {
     @Bean
     @ServiceConnection
     KafkaContainer kafka() {
-        return new KafkaContainer(DockerImageName.parse("apache/kafka-native:4.3.1"));
+        // Same as docker-compose.yml: topics are only created on purpose (NewTopic beans). With auto-create on,
+        // a missing NewTopic bean - e.g. for a dead-letter topic - would go unnoticed in the tests.
+        return new KafkaContainer(DockerImageName.parse("apache/kafka-native:4.3.1"))
+                .withEnv("KAFKA_AUTO_CREATE_TOPICS_ENABLE", "false");
     }
 }
