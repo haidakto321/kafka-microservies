@@ -74,7 +74,7 @@ trade-offs. Newest at the bottom of each milestone.
   stock is reserved twice (the `stock_reservation` primary key does not stop it,
   because `save()` with an assigned id merges). LEARNINGS section 4 and the
   listener comment are corrected.
-- **Notes for the M2 plan, from the final review:**
+- **Notes for the M2 plan, from the final review** (all done in M2 - see the M2 section):
   - Make the reservation insert-only (`Persistable.isNew()` or a `findById`
     check), as a second guard next to the processed-message table.
   - An optimistic-lock conflict must not use up the retry budget and land in the
@@ -88,3 +88,32 @@ trade-offs. Newest at the bottom of each milestone.
   - `scripts/stop-services.ps1` always force-kills (Windows `Stop-Process`), so a
     stopped instance holds its partitions for up to 45 s. Ask before adding a
     graceful stop (for example the actuator shutdown endpoint).
+
+## M2
+
+Decisions made in the M2 plan (`docs/superpowers/plans/2026-10-11-m2-reliability.md`):
+
+- **Outbox / dedupe classes are copied per service**, not shared: `messaging-contracts` stays "records only", and each service owns its tables. About 5 small classes per service.
+- **No `trace_parent` column yet** - nothing fills it until M4 (tracing); M4 adds it.
+- **No `ErrorHandlingDeserializer`** - values are plain strings; a JSON error is our `InvalidMessageException`, marked not retryable.
+- **Lock conflicts are retried in the listener** (3 immediate attempts) before the error handler sees them, so a valid command does not reach the DLT under load.
+- **`StockReservation` and `ProcessedMessage` are insert-only** (`Persistable.isNew()`): a second row for the same key fails on the primary key.
+- **The relay stops at the first failed send** and commits what it sent. Cost: one unsendable row holds back the rows behind it.
+- **The demo delay pauses after the DB commit, before the offset commit** - so E1 shows the duplicate skip, not just a rollback.
+- **Test Kafka has topic auto-create off**, like compose.
+- **Producer `max.block.ms: 5000`** so a Kafka outage does not hold the relay's transaction for 60 s.
+
+Changed during the build:
+
+- **The DLT name is set explicitly.** The plan assumed Spring Kafka's `DeadLetterPublishingRecoverer` writes to `<topic>.DLT`; in Spring Kafka 3.3.10 the default is `<topic>-dlt`. With auto-create off, publishing failed and the partition was stuck re-reading the record. Fixed with an explicit destination resolver (`record.topic() + Topics.DLT_SUFFIX`), keeping the spec's name. Caught only because the test broker has auto-create off.
+- **`@MockitoBean` by type, not by name**, for `KafkaTemplate` in `OutboxRelayTest`: replacing the bean by name fails because Spring Boot disables bean-definition overriding.
+- `OrderControllerTest.anUnknownProductIs400AndSavesNothing` now also checks that no outbox row was written (M1 review minor M3).
+
+Experiment notes (details in LEARNINGS sections 8-11):
+
+- E4: orders accepted in 20-24 ms with Kafka down; the relay sent the 3 waiting rows 0.5 s after Kafka came back.
+- E1: after the kill, the partitions came back only after ~47 s (session timeout of the killed member), then the same offset was redelivered and skipped as a duplicate.
+- E3: Redpanda Console's Murmur2 partitioner put the copies on the same partition as the Java producer.
+- E2: the DLT record is 14 bytes but carries ~6 KiB of headers (mostly the stack trace).
+- E6: one consumer thread with a 200 ms delay drained 500 messages at 4.6 per second (110 s).
+- PostgreSQL `jsonb` reorders the payload keys; harmless.

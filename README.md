@@ -7,6 +7,7 @@ What I learned: `docs/LEARNINGS.md`.
 ## Status
 
 M1 (Kafka basics) done: order-service and inventory-service talk through Kafka.
+M2 (reliability) done: outbox, idempotent consumers, retries and dead-letter topics.
 
 ## Run it (Windows, PowerShell)
 
@@ -20,6 +21,13 @@ Requirements: Docker Desktop running, JDK 21 installed at
 Invoke-RestMethod http://localhost:8081/orders/<id>
 .\scripts\stop-services.ps1
 docker compose stop
+```
+
+Experiments (see `docs/LEARNINGS.md` for what each one shows):
+
+```powershell
+.\scripts\outbox-status.ps1      # outbox rows waiting to be sent, per database
+.\scripts\start-instance.ps1 -Service inventory-service -Port 8082 -ExtraArgs '--demo.processing-delay-ms=15000'
 ```
 
 | What | Where |

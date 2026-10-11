@@ -1,8 +1,11 @@
 # Starts ONE instance of a service in the background, on the given port.
 # Example:  .\scripts\start-instance.ps1 -Service inventory-service -Port 8092
+# Extra Spring Boot settings (experiments E1, E6):
+#           .\scripts\start-instance.ps1 -Service inventory-service -Port 8082 -ExtraArgs '--demo.processing-delay-ms=15000'
 param(
     [Parameter(Mandatory)][string]$Service,
-    [Parameter(Mandatory)][int]$Port
+    [Parameter(Mandatory)][int]$Port,
+    [string[]]$ExtraArgs = @()
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -14,8 +17,8 @@ New-Item -ItemType Directory -Force -Path "$root\logs" | Out-Null
 $log = "$root\logs\$Service-$Port.log"
 
 # --server.port (not -Dserver.port): PowerShell can split -D arguments at the dot.
-$process = Start-Process -FilePath $java `
-    -ArgumentList @('-jar', "`"$($jar.FullName)`"", "--server.port=$Port") `
+$arguments = @('-jar', "`"$($jar.FullName)`"", "--server.port=$Port") + $ExtraArgs
+$process = Start-Process -FilePath $java -ArgumentList $arguments `
     -RedirectStandardOutput $log -RedirectStandardError "$log.err" `
     -WindowStyle Hidden -PassThru
 Set-Content -Path "$root\logs\$Service-$Port.pid" -Value $process.Id
