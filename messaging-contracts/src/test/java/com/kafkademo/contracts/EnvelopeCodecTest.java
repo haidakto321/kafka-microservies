@@ -90,4 +90,34 @@ class EnvelopeCodecTest {
                 .isInstanceOf(InvalidMessageException.class)
                 .hasMessageContaining("no payload");
     }
+
+    @Test
+    void rejectsANullValue() {
+        // A Kafka record can have a null value (a "tombstone").
+        assertThatThrownBy(() -> codec.fromJson(null))
+                .isInstanceOf(InvalidMessageException.class);
+    }
+
+    @Test
+    void rejectsTheJsonLiteralNull() {
+        assertThatThrownBy(() -> codec.fromJson("null"))
+                .isInstanceOf(InvalidMessageException.class);
+    }
+
+    @Test
+    void rebuildsAnEnvelopeFromStoredParts() {
+        UUID messageId = UUID.randomUUID();
+        UUID orderId = UUID.randomUUID();
+        // PostgreSQL jsonb may store the keys in another order - that must not matter.
+        String storedPayload = "{\"quantity\":2,\"productId\":1}";
+
+        MessageEnvelope rebuilt = codec.envelope(messageId, MessageTypes.RESERVE_STOCK, orderId, NOW, storedPayload);
+        MessageEnvelope received = codec.fromJson(codec.toJson(rebuilt));
+
+        assertThat(received.messageId()).isEqualTo(messageId);
+        assertThat(received.type()).isEqualTo(MessageTypes.RESERVE_STOCK);
+        assertThat(received.orderId()).isEqualTo(orderId);
+        assertThat(received.occurredAt()).isEqualTo(NOW);
+        assertThat(codec.payload(received, ReserveStock.class)).isEqualTo(new ReserveStock(1L, 2));
+    }
 }

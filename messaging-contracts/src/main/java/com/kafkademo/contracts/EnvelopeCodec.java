@@ -39,19 +39,36 @@ public class EnvelopeCodec {
     /**
      * Reads an envelope.
      *
-     * @throws InvalidMessageException if the text is not JSON or misses messageId, type or orderId
+     * @throws InvalidMessageException if the value is null, is not JSON, or misses messageId, type or orderId
      */
     public MessageEnvelope fromJson(String json) {
+        if (json == null) {
+            // A record with a null value (a "tombstone") has nothing to read.
+            throw new InvalidMessageException("Empty message (null value)");
+        }
         MessageEnvelope envelope;
         try {
             envelope = mapper.readValue(json, MessageEnvelope.class);
         } catch (JsonProcessingException e) {
             throw new InvalidMessageException("Not a valid message envelope: " + json, e);
         }
-        if (envelope.messageId() == null || envelope.type() == null || envelope.orderId() == null) {
+        // The JSON text "null" parses to null.
+        if (envelope == null || envelope.messageId() == null || envelope.type() == null || envelope.orderId() == null) {
             throw new InvalidMessageException("Envelope is missing messageId, type or orderId: " + json);
         }
         return envelope;
+    }
+
+    /**
+     * Rebuilds an envelope from stored parts. The outbox relay uses it to send a row exactly as it was written -
+     * with the same messageId every time it is sent, so consumers can spot a resend.
+     */
+    public MessageEnvelope envelope(UUID messageId, String type, UUID orderId, Instant occurredAt, String payloadJson) {
+        try {
+            return new MessageEnvelope(messageId, type, orderId, occurredAt, mapper.readTree(payloadJson));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Stored payload of message " + messageId + " is not JSON", e);
+        }
     }
 
     /**

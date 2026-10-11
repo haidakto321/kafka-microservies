@@ -23,6 +23,7 @@ spring:
       acks: all                       # the broker confirms only when the write is safe
       properties:
         enable.idempotence: true      # retries by the producer never create duplicates in Kafka
+        max.block.ms: 5000            # Kafka down: send() gives up after 5 s (default 60 s); the relay tries again later
     consumer:
       group-id: inventory-service     # all instances of this service share the work
       auto-offset-reset: earliest     # a new group starts from the oldest message
@@ -34,3 +35,6 @@ spring:
 logging:
   level:
     org.apache.kafka: WARN
+
+demo:
+  processing-delay-ms: 0              # experiments E1/E6: pause after each command, before the offset commit
