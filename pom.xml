@@ -24,6 +24,7 @@
     <modules>
         <module>messaging-contracts</module>
         <module>inventory-service</module>
+        <module>order-service</module>
     </modules>
 
     <dependencyManagement>
