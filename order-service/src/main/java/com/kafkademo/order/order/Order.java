@@ -69,6 +69,17 @@ public class Order {
         return true;
     }
 
+    /**
+     * Inventory could not reserve the stock. Only a PENDING order is waiting for that answer.
+     * @return false if the order is not PENDING - the reply is late or a duplicate and is ignored
+     */
+    public boolean markStockReservationFailed(Instant now) {
+        if (status != OrderStatus.PENDING) {
+            return false;
+        }
+        return cancel(CancelReason.OUT_OF_STOCK, now);
+    }
+
     /** @return false if the order is already CONFIRMED or CANCELLED */
     public boolean cancel(CancelReason reason, Instant now) {
         if (status != OrderStatus.PENDING && status != OrderStatus.STOCK_RESERVED) {

@@ -66,6 +66,18 @@ class OrderSagaServiceTest {
     }
 
     @Test
+    void aLateStockReservationFailedDoesNotCancelAReservedOrder() {
+        UUID orderId = orderService.placeOrder(1L, 1).getId();
+        saga.onStockReserved(orderId);
+
+        saga.onStockReservationFailed(orderId);
+
+        Order order = orders.findById(orderId).orElseThrow();
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.STOCK_RESERVED);
+        assertThat(order.getCancelReason()).isNull();
+    }
+
+    @Test
     void aDuplicateStockReservedChangesNothing() {
         UUID orderId = orderService.placeOrder(1L, 1).getId();
         saga.onStockReserved(orderId);

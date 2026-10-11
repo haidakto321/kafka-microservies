@@ -48,7 +48,7 @@ public class OrderSagaService {
             return;
         }
         Order order = found.get();
-        if (order.cancel(CancelReason.OUT_OF_STOCK, clock.instant())) {
+        if (order.markStockReservationFailed(clock.instant())) {
             log.info("Order {} -> CANCELLED (OUT_OF_STOCK)", orderId);
         } else {
             log.warn("StockReservationFailed ignored: order {} is already {}", orderId, order.getStatus());

@@ -45,7 +45,8 @@ public class InventoryCommandListener {
         ReserveStock command = codec.payload(envelope, ReserveStock.class);
         ReservationResult result = stockService.reserve(envelope.orderId(), command.productId(), command.quantity());
         // M1: the reply is sent AFTER the database commit, not together with it.
-        // If the app crashes in between, the stock is reserved but no reply is ever sent. M2 fixes this (outbox).
+        // If the app crashes in between (or the send times out), the offset is not committed either, so Kafka
+        // delivers the command again and the stock is reserved a SECOND time. M2 fixes this (outbox + idempotent consumer).
         if (result.reserved()) {
             replies.send(envelope.orderId(), MessageTypes.STOCK_RESERVED,
                     new StockReserved(command.productId(), command.quantity()));

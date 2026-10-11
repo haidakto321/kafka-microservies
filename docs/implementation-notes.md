@@ -59,5 +59,32 @@ trade-offs. Newest at the bottom of each milestone.
 - **M1 has no dead-letter topic yet.** A broken record (key `test`, value
   `hello`) was received 10 times in a row (Spring Kafka's default: 1 try + 9
   retries, no wait), logged as `InvalidMessageException`, then skipped - so it
-  is silently lost. M2 marks `InvalidMessageException` as not retryable and
+  is lost, with only an ERROR log line left. M2 marks `InvalidMessageException` as not retryable and
   sends it to `inventory-commands.DLT` instead.
+- **Final review changed one thing the plan prescribed.** A
+  `StockReservationFailed` that arrives after `StockReserved` used to cancel the
+  order (the plan's `cancel` accepts `STOCK_RESERVED`). Spec section 5 says a reply
+  that does not fit the state is ignored, so the saga now calls
+  `Order.markStockReservationFailed`, which only acts on a `PENDING` order.
+  `cancel` keeps accepting `STOCK_RESERVED`, because M3 needs it for
+  `PAYMENT_FAILED`. Test: `aLateStockReservationFailedDoesNotCancelAReservedOrder`.
+- **The consumer-side dual write duplicates, it does not lose.** The first
+  LEARNINGS draft said a crash between the stock commit and the reply loses the
+  reply. Wrong: the offset is not committed, the command is redelivered, and the
+  stock is reserved twice (the `stock_reservation` primary key does not stop it,
+  because `save()` with an assigned id merges). LEARNINGS section 4 and the
+  listener comment are corrected.
+- **Notes for the M2 plan, from the final review:**
+  - Make the reservation insert-only (`Persistable.isNew()` or a `findById`
+    check), as a second guard next to the processed-message table.
+  - An optimistic-lock conflict must not use up the retry budget and land in the
+    DLT: retry it inside `StockService`, or classify it apart from broken input.
+  - `EnvelopeCodec.fromJson` throws `IllegalArgumentException` / NPE (not
+    `InvalidMessageException`) for a null value (tombstone) or the text `null`;
+    fix it before marking `InvalidMessageException` as not retryable.
+  - E4 "before" picture: with Kafka down, `POST /orders` blocks (10 s `get`, up
+    to 60 s `max.block.ms`), returns 500, but the order is already saved as
+    `PENDING` and the record may still be delivered later (reviewer reading - check in E4).
+  - `scripts/stop-services.ps1` always force-kills (Windows `Stop-Process`), so a
+    stopped instance holds its partitions for up to 45 s. Ask before adding a
+    graceful stop (for example the actuator shutdown endpoint).

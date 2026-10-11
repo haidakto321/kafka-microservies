@@ -59,7 +59,9 @@ order-service --ReserveStock--> [inventory-commands: P0 | P1 | P2] --> inventory
 - `acks=all` + idempotent producer: the broker confirms a write only when it is
   safe, and producer retries never write duplicates into Kafka.
 - The consumer commits **after** processing each message, so a crash means the
-  message is read again, never lost (more in M2).
+  message is read again, not lost. Two catches: "read again" means "processed
+  again" (section 4), and a message that fails all 10 tries is skipped (section 5).
+  M2 fixes both.
 
 ### Interview answer
 
@@ -167,7 +169,7 @@ do**.
 
 ### Two more things E5 taught me (not planned!)
 
-**1. A conflict, a silent retry, and a log line that lied.** All 30 orders were
+**1. A conflict, a quiet retry, and a log line that lied.** All 30 orders were
 for the same product, so 3 instances updated the **same database row** at the
 same time. Some messages were processed **twice** - same partition, same offset:
 
@@ -176,16 +178,31 @@ same time. Some messages were processed **twice** - same partition, same offset:
 19:49:37.124 Command received: partition=2 offset=19 ...  -> "reserved 1 of product 1, 69 left"
 ```
 
-But the final stock was exactly right (98 - 30 = 68) and there was one
-reservation per order. What happened: the "reserved" log line is written
-**inside** the transaction, before the commit. The commit then failed because
-another instance had changed the same row first (optimistic locking with
-`@Version`), the transaction rolled back, and Spring Kafka's error handler
-retried the message - **silently**, because it only logs when all retries are
-used up. The retry succeeded.
+But the final stock was exactly right (98 - 30 = 68). What happened: the
+"reserved" log line is written **inside** the transaction, before the commit. The
+commit then failed because another instance had changed the same row first
+(optimistic locking with `@Version`), the transaction rolled back, and Spring
+Kafka's error handler retried the message. The retry was **quiet**: after each
+failed try Spring Kafka logs only one INFO line, without the cause:
+
+```
+INFO ... o.s.k.l.KafkaMessageListenerContainer : Record in retry and not yet recovered
+```
+
+(The 3 instance logs had 20 of these lines.) The full ERROR with the stack trace
+comes only when all tries fail. Here the next try succeeded.
 - `@Version` prevented overselling under real concurrency.
 - A log line written inside a transaction can describe work that was rolled
   back. Log "success" after the commit, or remember this when debugging.
+- To find these retries, grep for `Record in retry`.
+- **The retry has a limit:** 10 tries, no wait between them. Under heavy
+  contention a valid `ReserveStock` could lose 10 times in a row. It would then
+  be skipped (ERROR log), no reply would be sent, and the order would stay
+  `PENDING` forever. M2 must not treat a lock conflict like a broken message:
+  retry the conflict inside the service, don't send it to the dead-letter topic.
+- Only the stock count proves that no order was reserved twice. The reservation
+  table can't prove it: saving a reservation for an order that already has one
+  updates the row instead of failing (section 4).
 
 **2. A killed consumer keeps its partitions for 45 seconds.** I stopped the
 extra instances with a force kill, so they never told Kafka they were leaving.
@@ -220,6 +237,9 @@ happens immediately. This is why consumer lag spikes when an instance crashes.
   idempotent).
 - *"What if two consumers update the same row?"* - Use locking. Here optimistic
   locking (`@Version`) made the loser fail and retry; I saw it happen in E5.
+  The default retry gives up after 10 tries, so under heavy contention you
+  retry the conflict in the service code, or use a pessimistic lock
+  (`SELECT ... FOR UPDATE`).
 
 ---
 
@@ -230,8 +250,30 @@ happens immediately. This is why consumer lag spikes when an instance crashes.
 In M1, `order-service` saves the order in the database, **then** sends
 `ReserveStock` to Kafka. These are two separate writes. If the app crashes
 between them, the order is saved but the message is never sent - the order stays
-`PENDING` forever. The same happens in `inventory-service` between reserving the
-stock and sending the reply.
+`PENDING` forever.
+
+In `inventory-service` the same crash has a **different** result. The stock is
+reserved and committed, but the reply is not sent - and the Kafka offset is not
+committed either (it is committed only after the listener returns). After the
+restart Kafka delivers the same `ReserveStock` again, so inventory **reserves the
+stock a second time**, then sends a reply. The result is a **duplicate**, not a
+lost reply.
+
+- The same happens if sending the reply times out (`.get(10, SECONDS)` in
+  `ReplyPublisher`). A timeout does not mean "not sent": the producer keeps
+  trying in the background (up to `delivery.timeout.ms`, 2 minutes), so the first
+  reply can still arrive. Then order-service gets two replies.
+- The primary key on `stock_reservation.order_id` does not stop the duplicate.
+  We set the id ourselves, so Spring Data's `save()` cannot tell the entity is
+  new. It does a merge (SELECT, then UPDATE the existing row) instead of an
+  INSERT that would fail.
+
+So: on the **sending** side the dual write **loses** messages; on the
+**receiving** side, with at-least-once delivery, it **repeats** side effects.
+M2 needs both fixes: the outbox (nothing lost) and an idempotent consumer
+(nothing done twice). One alone is not enough: an idempotent consumer without
+the outbox turns this duplicate into a lost reply (on redelivery it sees "already
+done" and skips, so the reply is never sent).
 
 ### Why it matters
 
