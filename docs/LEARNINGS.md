@@ -35,7 +35,7 @@ many different services read the same messages.
 | **Partition** | A topic is split into partitions. Each partition is an **ordered** log. Partitions are how Kafka works in parallel. | 3 partitions per topic |
 | **Offset** | A message's position number inside its partition (0, 1, 2...) | Printed in the logs: `offset=12` |
 | **Key** | Decides the partition: same key -> same partition | The `orderId` |
-| **Producer** | Writes messages | `CommandPublisher`, `ReplyPublisher` |
+| **Producer** | Writes messages | `OutboxRelay` (M1: `CommandPublisher`, `ReplyPublisher`) |
 | **Consumer** | Reads messages | `InventoryCommandListener`, `SagaReplyListener` |
 | **Consumer group** | Consumers that **share** the work of a topic. Each partition is read by exactly one consumer of the group. | Groups `inventory-service`, `order-service` |
 | **Rebalance** | When a consumer joins or leaves a group, partitions are handed out again | Seen in E5 |
@@ -98,7 +98,9 @@ partition, in order.
 
 ### How it works here
 
-`CommandPublisher` and `ReplyPublisher` always send with `key = orderId`.
+Every message is sent with `key = orderId`. In M1 `CommandPublisher` and
+`ReplyPublisher` did it; since M2 `OutboxRelay` sends every message, with the
+row's `aggregate_id` (the orderId) as the key.
 
 ### What I saw (E7)
 
@@ -200,9 +202,14 @@ comes only when all tries fail. Here the next try succeeded.
   be skipped (ERROR log), no reply would be sent, and the order would stay
   `PENDING` forever. M2 must not treat a lock conflict like a broken message:
   retry the conflict inside the service, don't send it to the dead-letter topic.
-- Only the stock count proves that no order was reserved twice. The reservation
-  table can't prove it: saving a reservation for an order that already has one
-  updates the row instead of failing (section 4).
+  **Since M2:** the listener tries a lock conflict 3 times right away, then the
+  error handler retries after 1 s, 2 s and 4 s, then the record goes to the DLT
+  (section 10).
+- Only the stock count proves that no order was reserved twice. In M1 the
+  reservation table couldn't prove it: saving a reservation for an order that
+  already had one updated the row instead of failing (section 4). **Since M2** the
+  reservation is insert-only, so a second one fails on the primary key
+  (section 9).
 
 **2. A killed consumer keeps its partitions for 45 seconds.** I stopped the
 extra instances with a force kill, so they never told Kafka they were leaving.
@@ -237,9 +244,9 @@ happens immediately. This is why consumer lag spikes when an instance crashes.
   idempotent).
 - *"What if two consumers update the same row?"* - Use locking. Here optimistic
   locking (`@Version`) made the loser fail and retry; I saw it happen in E5.
-  The default retry gives up after 10 tries, so under heavy contention you
-  retry the conflict in the service code, or use a pessimistic lock
-  (`SELECT ... FOR UPDATE`).
+  Spring Kafka's default retry gives up after 10 tries, so under heavy
+  contention you retry the conflict in the service code (this project, since
+  M2), or use a pessimistic lock (`SELECT ... FOR UPDATE`).
 
 ---
 
@@ -381,8 +388,9 @@ once). People call the result "effectively once".
 - *"Why not use Kafka transactions?"* - They make "read from Kafka, write to
   Kafka" atomic. Our write goes to PostgreSQL, which is not part of them.
 - *"Where can duplicates come from?"* - A crash after the work but before the
-  offset commit (E1), a rebalance, the outbox relay sending a row again, or
-  someone producing the same message twice (E3).
+  offset commit (E1), a rebalance, the outbox relay sending a row again
+  (including copies left in the producer's buffer while Kafka was down - E4b in
+  section 8), or someone producing the same message twice (E3).
 
 ---
 
@@ -424,9 +432,17 @@ POST /orders
 - A **partial index** (`WHERE published_at IS NULL`) keeps the query fast however
   many sent rows pile up.
 - The relay stops at the first failed send, so a newer message never overtakes an
-  older one.
-- `max.block.ms: 5000`: with Kafka down, a send gives up after 5 s instead of the
-  default 60 s, so the relay does not hold its transaction for a minute.
+  older one (with one relay instance - see the follow-up questions).
+- Kafka down - two different waits (E4 and E4b below):
+  - `max.block.ms: 5000` only limits how long `send()` waits for **topic
+    metadata** (default 60 s). It applies when the producer has not talked to
+    that topic yet.
+  - If the producer already has the metadata, `send()` returns at once and puts
+    the record in its **buffer**; the relay's `.get(10, SECONDS)` then times out.
+    The buffered copy is **not** cancelled: the producer keeps trying for up to
+    `delivery.timeout.ms` (120 s). So every failed relay run leaves one more copy,
+    and they are all delivered when Kafka comes back. The consumers skip them as
+    duplicates - "a timeout does not mean not sent" again (section 4).
 - Trade-off: the relay keeps its DB transaction open while it talks to Kafka. Fine
   for a demo; at high volume you would send first and mark in a short separate
   transaction, or use CDC.
@@ -443,13 +459,34 @@ POST /orders
     489 ms - JVM warm-up). The request never touches Kafka now.
   - `outbox-status.ps1`: order_db **3 waiting**.
   - order-service logged `Outbox relay: could not send ReserveStock ... will try
-    again: Send failed` about every 5.5 s (5 s `max.block.ms` + 500 ms delay).
+    again: ... Send failed` about every 5.5 s (5 s `max.block.ms` + 500 ms
+    delay). This order-service had not sent anything since it started, so the
+    producer had no metadata yet.
   - Kafka started at 23:28:32.8; the relay logged `sent 3 of 3` at **23:28:33.3**
     (0.5 s later). Inventory reserved the stock at 33.7, its own relay sent the 3
     replies at 34.1, and all 3 orders were `STOCK_RESERVED`. 0 rows waiting.
 - Why: the order and its message were one commit; the message just waited in the
   table until the relay could send it. Compare M1: a send failure there turned
   into a 500 for an order that was already saved.
+
+### What I saw (E4b - Kafka down after the producer already has metadata)
+
+Found in the final review of M2, then checked for real:
+
+- What I did: started the services, placed one order (so the producer knew the
+  topic), stopped Kafka, placed one more order, waited 40 s, started Kafka.
+- What I saw:
+  - The relay warned every **10.5 s** (the 10 s `.get` timeout + 500 ms), not
+    every 5.5 s - `max.block.ms` did not apply. (The first version even logged
+    `will try again: null`, because a `TimeoutException` has no message; it now
+    logs the exception name.)
+  - When Kafka came back, inventory received the command **4 times**: processed
+    once, then `Duplicate message ... skipped` 3 times - one copy for each failed
+    relay run, delivered from the producer's buffer.
+  - Stock was taken once; the order reached `STOCK_RESERVED`.
+- Why: `.get()` timing out does not cancel the send. The idempotent consumer is
+  what keeps this correct. (A cleaner relay would set `delivery.timeout.ms`
+  below the `.get` timeout, so a failed run leaves nothing behind.)
 
 ### Interview answer
 

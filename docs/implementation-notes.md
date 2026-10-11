@@ -74,7 +74,7 @@ trade-offs. Newest at the bottom of each milestone.
   stock is reserved twice (the `stock_reservation` primary key does not stop it,
   because `save()` with an assigned id merges). LEARNINGS section 4 and the
   listener comment are corrected.
-- **Notes for the M2 plan, from the final review** (all done in M2 - see the M2 section):
+- **Notes for the M2 plan, from the final review** (done in M2 except the graceful stop - see the M2 section):
   - Make the reservation insert-only (`Persistable.isNew()` or a `findById`
     check), as a second guard next to the processed-message table.
   - An optimistic-lock conflict must not use up the retry budget and land in the
@@ -99,6 +99,7 @@ Decisions made in the M2 plan (`docs/superpowers/plans/2026-10-11-m2-reliability
 - **Lock conflicts are retried in the listener** (3 immediate attempts) before the error handler sees them, so a valid command does not reach the DLT under load.
 - **`StockReservation` and `ProcessedMessage` are insert-only** (`Persistable.isNew()`): a second row for the same key fails on the primary key.
 - **The relay stops at the first failed send** and commits what it sent. Cost: one unsendable row holds back the rows behind it.
+  The plan said "Kafka down = one failure per run, no duplicates" - only half true (see E4b below).
 - **The demo delay pauses after the DB commit, before the offset commit** - so E1 shows the duplicate skip, not just a rollback.
 - **Test Kafka has topic auto-create off**, like compose.
 - **Producer `max.block.ms: 5000`** so a Kafka outage does not hold the relay's transaction for 60 s.
@@ -117,3 +118,10 @@ Experiment notes (details in LEARNINGS sections 8-11):
 - E2: the DLT record is 14 bytes but carries ~6 KiB of headers (mostly the stack trace).
 - E6: one consumer thread with a 200 ms delay drained 500 messages at 4.6 per second (110 s).
 - PostgreSQL `jsonb` reorders the payload keys; harmless.
+
+Final review (fresh reviewer on the whole M2 branch):
+
+- **E4b - Kafka down after the producer has metadata.** `max.block.ms` only bounds the metadata wait. With metadata cached, `send()` buffers the record, `.get(10 s)` times out, and the buffered copy stays alive for `delivery.timeout.ms` (120 s). Checked for real: 3 failed relay runs -> 4 copies delivered when Kafka came back, 3 skipped as duplicates. Data correct (idempotent consumer). LEARNINGS section 8 now explains both cases. Not changed in code: setting `delivery.timeout.ms` below the `.get` timeout would stop the extra copies - left as a note.
+- The relay logged `will try again: null` for a timeout (a `TimeoutException` has no message). It now logs `e.toString()`; pinned by `OutboxRelayWarningTest`.
+- LEARNINGS sections 2 and 3 still described M1 classes and rules as current; now marked "Since M2".
+- Still open from the M1 notes: a graceful stop script (owner's decision), so E1 and every scripted stop still wait ~45 s for the session timeout.

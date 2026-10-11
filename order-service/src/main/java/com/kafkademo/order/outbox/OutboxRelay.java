@@ -70,8 +70,9 @@ public class OutboxRelay {
             return false;
         } catch (ExecutionException | TimeoutException | RuntimeException e) {
             // RuntimeException: the producer can also throw directly instead of failing the future.
+            // toString(), not getMessage(): a TimeoutException has no message and would log "null".
             log.warn("Outbox relay: could not send {} {} for order {} - will try again: {}",
-                    event.getType(), event.getId(), event.getAggregateId(), e.getMessage());
+                    event.getType(), event.getId(), event.getAggregateId(), e.toString());
             return false;
         }
     }
