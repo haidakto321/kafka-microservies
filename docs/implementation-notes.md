@@ -53,3 +53,11 @@ trade-offs. Newest at the bottom of each milestone.
   Found while running the controller test without the controller: a plain 404
   test also passes when the endpoint does not exist at all, so the tests now
   check the error's `detail` message too.
+- **Redpanda Console can produce messages** (checked in Task 7): Topics ->
+  inventory-commands -> Produce Record (key and value as Text). M2 experiments
+  E2 and E3 use it.
+- **M1 has no dead-letter topic yet.** A broken record (key `test`, value
+  `hello`) was received 10 times in a row (Spring Kafka's default: 1 try + 9
+  retries, no wait), logged as `InvalidMessageException`, then skipped - so it
+  is silently lost. M2 marks `InvalidMessageException` as not retryable and
+  sends it to `inventory-commands.DLT` instead.
