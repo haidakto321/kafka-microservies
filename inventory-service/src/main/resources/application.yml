@@ -1,0 +1,36 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: inventory-service
+  datasource:
+    url: jdbc:postgresql://localhost:5433/inventory_db
+    username: demo
+    password: demo
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  mvc:
+    problemdetails:
+      enabled: true                   # errors as RFC 9457 JSON: {"status":404,"detail":"..."}
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all                       # the broker confirms only when the write is safe
+      properties:
+        enable.idempotence: true      # retries by the producer never create duplicates in Kafka
+    consumer:
+      group-id: inventory-service     # all instances of this service share the work
+      auto-offset-reset: earliest     # a new group starts from the oldest message
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      ack-mode: record                # commit the offset after each message is processed
+
+logging:
+  level:
+    org.apache.kafka: WARN

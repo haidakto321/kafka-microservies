@@ -46,3 +46,10 @@ trade-offs. Newest at the bottom of each milestone.
   Prometheus, Grafana) will need the same trick on this network.
 - Redpanda Console starts faster than Kafka, logs "connection refused" once,
   and connects one second later - harmless.
+- **`apache/kafka-native:4.3.1` works with Testcontainers' `KafkaContainer`**
+  and Spring Boot's `@ServiceConnection` (checked in Task 4). Tests reuse the
+  same images as Docker Compose.
+- **Errors use RFC 9457 Problem Details** (`spring.mvc.problemdetails.enabled`).
+  Found while running the controller test without the controller: a plain 404
+  test also passes when the endpoint does not exist at all, so the tests now
+  check the error's `detail` message too.

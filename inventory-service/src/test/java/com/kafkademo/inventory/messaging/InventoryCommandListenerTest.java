@@ -1,0 +1,140 @@
+package com.kafkademo.inventory.messaging;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.kafkademo.contracts.EnvelopeCodec;
+import com.kafkademo.contracts.MessageEnvelope;
+import com.kafkademo.contracts.MessageTypes;
+import com.kafkademo.contracts.Topics;
+import com.kafkademo.contracts.payload.ReserveStock;
+import com.kafkademo.contracts.payload.StockReservationFailed;
+import com.kafkademo.contracts.payload.StockReserved;
+import com.kafkademo.inventory.IntegrationTestContainers;
+import com.kafkademo.inventory.product.Product;
+import com.kafkademo.inventory.product.ProductRepository;
+import com.kafkademo.inventory.reservation.ReservationStatus;
+import com.kafkademo.inventory.reservation.StockReservationRepository;
+import java.math.BigDecimal;
+import java.time.Duration;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import org.apache.kafka.clients.consumer.Consumer;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.Import;
+import org.springframework.kafka.core.ConsumerFactory;
+import org.springframework.kafka.core.KafkaTemplate;
+
+@SpringBootTest
+@Import(IntegrationTestContainers.class)
+class InventoryCommandListenerTest {
+
+    @Autowired
+    KafkaTemplate<String, String> kafka;
+    @Autowired
+    ConsumerFactory<String, String> consumerFactory;
+    @Autowired
+    EnvelopeCodec codec;
+    @Autowired
+    ProductRepository products;
+    @Autowired
+    StockReservationRepository reservations;
+
+    @Test
+    void reservesStockAndRepliesStockReserved() throws Exception {
+        long productId = newProduct(3);
+        UUID orderId = UUID.randomUUID();
+
+        sendCommand(orderId, MessageTypes.RESERVE_STOCK, new ReserveStock(productId, 2));
+
+        MessageEnvelope reply = awaitReply(orderId);
+        assertThat(reply.type()).isEqualTo(MessageTypes.STOCK_RESERVED);
+        assertThat(codec.payload(reply, StockReserved.class)).isEqualTo(new StockReserved(productId, 2));
+        assertThat(products.findById(productId).orElseThrow().getStock()).isEqualTo(1);
+        assertThat(reservations.findById(orderId).orElseThrow().getStatus()).isEqualTo(ReservationStatus.RESERVED);
+    }
+
+    @Test
+    void notEnoughStockRepliesOutOfStockAndKeepsTheStock() throws Exception {
+        long productId = newProduct(1);
+        UUID orderId = UUID.randomUUID();
+
+        sendCommand(orderId, MessageTypes.RESERVE_STOCK, new ReserveStock(productId, 2));
+
+        MessageEnvelope reply = awaitReply(orderId);
+        assertThat(reply.type()).isEqualTo(MessageTypes.STOCK_RESERVATION_FAILED);
+        assertThat(codec.payload(reply, StockReservationFailed.class).reason()).isEqualTo("OUT_OF_STOCK");
+        assertThat(products.findById(productId).orElseThrow().getStock()).isEqualTo(1);
+        assertThat(reservations.findById(orderId)).isEmpty();
+    }
+
+    @Test
+    void anUnknownProductRepliesUnknownProduct() throws Exception {
+        UUID orderId = UUID.randomUUID();
+
+        sendCommand(orderId, MessageTypes.RESERVE_STOCK, new ReserveStock(987_654_321L, 1));
+
+        MessageEnvelope reply = awaitReply(orderId);
+        assertThat(reply.type()).isEqualTo(MessageTypes.STOCK_RESERVATION_FAILED);
+        assertThat(codec.payload(reply, StockReservationFailed.class).reason()).isEqualTo("UNKNOWN_PRODUCT");
+    }
+
+    @Test
+    void anUnknownCommandTypeIsSkipped() throws Exception {
+        long productId = newProduct(5);
+        UUID orderId = UUID.randomUUID();
+
+        sendCommand(orderId, "Bogus", new ReserveStock(productId, 1));
+        sendCommand(orderId, MessageTypes.RESERVE_STOCK, new ReserveStock(productId, 1));
+
+        assertThat(awaitReply(orderId).type()).isEqualTo(MessageTypes.STOCK_RESERVED);
+        assertThat(products.findById(productId).orElseThrow().getStock()).isEqualTo(4);
+    }
+
+    @Test
+    void aBrokenMessageDoesNotBlockTheMessagesBehindIt() throws Exception {
+        long productId = newProduct(5);
+        UUID orderId = UUID.randomUUID();
+
+        // Same key = same partition: the valid message waits right behind the broken one.
+        sendRaw(orderId.toString(), "this is not json");
+        sendCommand(orderId, MessageTypes.RESERVE_STOCK, new ReserveStock(productId, 1));
+
+        assertThat(awaitReply(orderId).type()).isEqualTo(MessageTypes.STOCK_RESERVED);
+    }
+
+    private long newProduct(int stock) {
+        long id = ThreadLocalRandom.current().nextLong(10_000, 1_000_000_000L); // away from the seed ids 1-4
+        products.save(new Product(id, "Test product " + id, new BigDecimal("5.00"), stock));
+        return id;
+    }
+
+    private void sendCommand(UUID orderId, String type, Object payload) throws Exception {
+        String json = codec.toJson(codec.wrap(type, orderId, payload));
+        kafka.send(Topics.INVENTORY_COMMANDS, orderId.toString(), json).get(10, TimeUnit.SECONDS);
+    }
+
+    private void sendRaw(String key, String value) throws Exception {
+        kafka.send(Topics.INVENTORY_COMMANDS, key, value).get(10, TimeUnit.SECONDS);
+    }
+
+    /** Reads saga-replies from the beginning until a reply for this order shows up. */
+    private MessageEnvelope awaitReply(UUID orderId) {
+        try (Consumer<String, String> consumer = consumerFactory.createConsumer("test-" + UUID.randomUUID(), null)) {
+            consumer.subscribe(List.of(Topics.SAGA_REPLIES));
+            long deadline = System.currentTimeMillis() + 30_000;
+            while (System.currentTimeMillis() < deadline) {
+                for (ConsumerRecord<String, String> record : consumer.poll(Duration.ofMillis(500))) {
+                    if (orderId.toString().equals(record.key())) {
+                        return codec.fromJson(record.value());
+                    }
+                }
+            }
+        }
+        throw new AssertionError("No reply on " + Topics.SAGA_REPLIES + " for order " + orderId);
+    }
+}

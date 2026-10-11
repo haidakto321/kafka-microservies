@@ -23,6 +23,7 @@
 
     <modules>
         <module>messaging-contracts</module>
+        <module>inventory-service</module>
     </modules>
 
     <dependencyManagement>
