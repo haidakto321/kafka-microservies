@@ -1,0 +1,5 @@
+# Shell scripts must keep LF endings or bash cannot run them (core.autocrlf is on).
+mvnw text eol=lf
+*.sh text eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

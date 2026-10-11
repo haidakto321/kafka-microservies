@@ -1,0 +1,58 @@
+name: kafka-demo
+
+services:
+  kafka:
+    image: apache/kafka-native:4.3.1
+    container_name: kafka-demo-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # One node is both broker and controller (KRaft mode - no ZooKeeper).
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # PLAINTEXT is for the services on the host, DOCKER is for containers (Redpanda Console).
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,DOCKER://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,DOCKER://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,DOCKER:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: DOCKER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      # Single broker: internal topics can only have 1 copy.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics must be created on purpose (NewTopic beans), never by accident.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: 3
+
+  console:
+    image: redpandadata/console:v3.12.0
+    container_name: kafka-demo-console
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_BROKERS: kafka:29092
+    depends_on:
+      - kafka
+
+  postgres:
+    image: postgres:17.4
+    container_name: kafka-demo-postgres
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: postgres
+    volumes:
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:
