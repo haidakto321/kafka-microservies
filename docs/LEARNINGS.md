@@ -1006,16 +1006,28 @@ recover.
 
 - **Aspect order matters.** Resilience4j's default is `Retry( CircuitBreaker(
   call ) )`: the retry is **outside**, so the breaker counts **every attempt** -
-  3 per request, so it opens after about 4 failed requests. The other style puts
-  the breaker around the whole retry, `CircuitBreaker( Retry( call ) )`: one
-  request counts once (opens later), but when it is open it also stops the
-  retries at once. Know both.
+  3 per request. The other style puts the breaker around the whole retry,
+  `CircuitBreaker( Retry( call ) )`: one request counts once, and an open
+  breaker stops the whole request at once. Know both.
+- With the default order, an **open** breaker still fails fast here - but only
+  because the retry list (`retry-exceptions`) does not contain the breaker's
+  `CallNotPermittedException`. With Resilience4j's default retry settings (retry
+  on every exception) the retry would keep knocking on the open breaker. To
+  switch to the other style, change the aspect order:
+  `resilience4j.retry.retryAspectOrder` / `resilience4j.circuitbreaker.circuitBreakerAspectOrder`
+  (the higher number runs first, i.e. outside).
 - The fallback sits on `@Retry` (the outer one). On the inner `@CircuitBreaker`
   it would turn the error into a 503 **before** Retry sees it, and nothing would
   ever be retried.
-- Only outages count: a **404** is an answer ("no such product"), so it is not
-  retried, not counted by the breaker, and the client gets 400 "Product 99 not
-  found".
+- The fallback only catches **outages** (breaker open, no answer, 5xx): three
+  small fallback methods, one per exception type. Anything else - a 404, a 400,
+  a bug in our code - passes through unchanged, instead of telling the client
+  "try again" for something that will never work.
+- What the breaker counts: `record-exceptions` lists the outages; every
+  **other** result counts as a **success** - including a 404. So a 404 is not
+  retried and is not a failure, but it does take a place in the 10-call window.
+  (To leave it out completely, list it under `ignore-exceptions`.) The client
+  gets 400 "Product 99 not found".
 - The state is on `/actuator/circuitbreakers`, and in Grafana.
 - Build note: the Spring Cloud BOM also manages Resilience4j (older version).
   Mixed versions failed at start-up (`NoClassDefFoundError`); importing
@@ -1041,9 +1053,17 @@ recover.
 - Why:
   - Requests 1-2 tried 3 times each (connection refused is fast, so ~0.5 s
     including the 200 ms waits).
-  - It opened during request 3, earlier than "about 4": the window of the last
-    10 calls still held **successful** calls from the end-to-end check, so 50%
-    was reached sooner.
+  - Why request 3, not 4? The breaker decides **nothing** until it has seen 10
+    calls (`minimum-number-of-calls`). The end-to-end check had just left 3
+    **successful** calls in the window (Keyboard, Laptop, mug). Requests 1-2 added
+    6 failures (9 calls), so the 10th call was request 3's first attempt: 7 of 10
+    failed = 70% -> OPEN. That is also why request 3 took only 244 ms: one real
+    attempt, the 200 ms wait, then the second attempt was refused by the open
+    breaker.
+  - Counter-intuitive: **more** earlier successes made it open **sooner** - they
+    fill the 10-call minimum, and the failures still win the 50%. With no history,
+    the 10th call (and the opening) would come in request 4; with 5 or more
+    successes in the window, already in request 2.
   - Open = inventory is not called at all; 30-40 ms is just the gateway and
     order-service.
   - Prometheus showed `state="open"` = 1 at 08:23:15-20 and `half_open` at

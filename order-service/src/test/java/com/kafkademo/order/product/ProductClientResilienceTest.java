@@ -28,6 +28,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.web.client.HttpClientErrorException;
 
 /** The real ProductClient (with its Resilience4j aspects) against a fake inventory that fails on demand. */
 @SpringBootTest(properties = "inventory.timeout=500ms")
@@ -101,6 +102,30 @@ class ProductClientResilienceTest {
         assertThatThrownBy(() -> productClient.getProduct(1L)).isInstanceOf(ProductServiceUnavailableException.class);
 
         assertThat(HITS.get()).isEqualTo(hitsWhenOpen); // open: inventory is not even called
+    }
+
+    @Test
+    void theBreakerRecoversThroughHalfOpen() {
+        CircuitBreaker breaker = breakers.circuitBreaker("inventory");
+        breaker.transitionToOpenState();
+        breaker.transitionToHalfOpenState(); // what happens by itself 10 s after opening
+
+        for (int i = 0; i < 3; i++) { // 3 permitted test calls, all good
+            assertThat(productClient.getProduct(1L).name()).isEqualTo("Keyboard");
+        }
+
+        assertThat(breaker.getState()).isEqualTo(CircuitBreaker.State.CLOSED);
+    }
+
+    /** Only outages become "try again later". A 400 is a bug or a bad request - retrying would never help. */
+    @Test
+    void aClientErrorFromInventoryIsNotReportedAsAnOutage() {
+        STATUS.set(400);
+
+        assertThatThrownBy(() -> productClient.getProduct(1L))
+                .isNotInstanceOf(ProductServiceUnavailableException.class)
+                .isInstanceOf(HttpClientErrorException.class);
+        assertThat(HITS.get()).isEqualTo(1);
     }
 
     @Test

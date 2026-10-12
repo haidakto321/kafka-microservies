@@ -155,7 +155,7 @@ Decisions made in the M4 plan (`docs/superpowers/plans/2026-10-12-m4-patterns.md
 - **Versions:** Spring Cloud 2025.0.3 (Gateway 4.3.5), Resilience4j 2.4.0; images `jaegertracing/jaeger:2.21.0`, `prom/prometheus:v3.14.0`, `grafana/grafana:12.4.11`, pulled through `mirror.gcr.io` (Docker Hub still blocked here), digests equal to Docker Hub. Images on disk: 2.99 GB -> 4.69 GB.
 - **Gateway artifact `spring-cloud-starter-gateway-server-webflux`**, routes under `spring.cloud.gateway.server.webflux.routes`.
 - **Aspect order = Resilience4j default** (Retry outside the circuit breaker); the fallback is on `@Retry`.
-- **Retry and breaker count only outages** (connection errors, timeouts, 5xx); a 404 stays a 400.
+- **Retry and breaker treat only outages as failures** (connection errors, timeouts, 5xx); a 404 stays a 400 and is counted by the breaker as a success (corrected after the final review).
 - **`minimum-number-of-calls: 10`** (the default 100 would never open in a demo).
 - **Timeout on the RestClient** via a `RestClientCustomizer` (2 s), so the `MockRestServiceServer` unit test still works.
 - **Outbox trace context in `OutboxTracing`** (one per service): stores `traceparent` with the row, the relay continues it.
@@ -174,7 +174,17 @@ Changed during the build:
 Experiment findings (details in LEARNINGS sections 17-20):
 
 - E9: one trace, 20 spans, 5 services, ~3.3 s, crossing every outbox; the gaps before each "outbox publish" span are the relay's poll wait.
-- E8: breaker opened during the 3rd failed request (the window still held earlier successes), then 503 in ~35 ms; HALF_OPEN after 10 s, CLOSED after 3 good calls.
+- E8: breaker opened during the 3rd failed request, then 503 in ~35 ms; HALF_OPEN after 10 s, CLOSED after 3 good calls. Cause (corrected after the final review): 3 successes from the e2e run filled the 10-call minimum sooner, so the 10th call (7 of 10 failed) was request 3's first attempt.
 - PromQL gotcha: the 503 series was born during the outage, so `increase()` showed 0 although the counter was 8 - the 5xx panel stayed flat.
 - Gateway: unknown paths (no route) are not access-logged; reactive log lines carry no trace id; proxied requests have `uri="UNKNOWN"` in metrics.
 - `OutboxTracingTest` exports a "test request" trace to Jaeger when Jaeger is running during the build - harmless.
+
+Final review of M4 (fresh reviewer on the whole branch):
+
+- **The fallback caught every exception**, so a 400 from inventory or a bug in our code became "503, try again". Now three typed fallbacks (breaker open, no answer, 5xx); everything else passes through. Pinned by `aClientErrorFromInventoryIsNotReportedAsAnOutage`.
+- **Half-open recovery had no test** although Review Focus 2 claimed one: added `theBreakerRecoversThroughHalfOpen`.
+- **LEARNINGS 18 corrected:** the E8 cause (see above), a 404 counts as a breaker success, and why the default aspect order still fails fast here (`CallNotPermittedException` is not in `retry-exceptions`) plus the aspect-order properties.
+- **Dashboard:** the request, latency and error panels now leave out `/actuator/**` (Prometheus' own scrapes dominated them when idle).
+- Checked live: with order-service down the gateway answers 500 and the access log line says 500 too.
+- `tasks.scheduled.execution: false` also removes the scheduled-task timer metric, not only the traces.
+- For M5: spec 7.4 liveness/readiness probes (`management.endpoint.health.probes.enabled`) are not built yet.

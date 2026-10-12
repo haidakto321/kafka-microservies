@@ -1,10 +1,13 @@
 package com.kafkademo.order.product;
 
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.retry.annotation.Retry;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.HttpServerErrorException;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 
 /**
@@ -35,14 +38,25 @@ public class ProductClient {
                 .body(ProductInfo.class);
     }
 
-    /**
-     * Called after the last failed attempt, or at once when the breaker is open. Fail fast with a 503 -
-     * never guess a price. A 404 is an answer, not an outage, so it is passed on unchanged.
+    /*
+     * Fallbacks: called after the last failed attempt, or at once when the breaker is open. Fail fast with a 503 -
+     * never guess a price. Only OUTAGES get one: Resilience4j picks the fallback whose exception type matches, and
+     * any other exception (a 404 -> ProductNotFoundException, a 400, a bug in our code) is thrown on unchanged,
+     * instead of telling the client to "try again" for something that will never work.
      */
-    private ProductInfo unavailable(long productId, Throwable cause) {
-        if (cause instanceof ProductNotFoundException notFound) {
-            throw notFound;
-        }
-        throw new ProductServiceUnavailableException(cause);
+
+    /** The breaker is open: inventory is not even called. */
+    private ProductInfo unavailable(long productId, CallNotPermittedException breakerOpen) {
+        throw new ProductServiceUnavailableException(breakerOpen);
+    }
+
+    /** Connection refused or timed out, after the last attempt. */
+    private ProductInfo unavailable(long productId, ResourceAccessException noAnswer) {
+        throw new ProductServiceUnavailableException(noAnswer);
+    }
+
+    /** inventory answered 5xx, after the last attempt. */
+    private ProductInfo unavailable(long productId, HttpServerErrorException serverError) {
+        throw new ProductServiceUnavailableException(serverError);
     }
 }
