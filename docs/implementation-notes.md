@@ -147,3 +147,34 @@ End-to-end results (details in LEARNINGS section 13):
 
 - Both runs: all 7 checks passed. Warm run: Keyboard `CONFIRMED` in 1.37 s, Laptop `CANCELLED / PAYMENT_FAILED` in 1.0 s with stock 10 -> 10, mug `CANCELLED / OUT_OF_STOCK` in 0.37 s. Keyboard and Laptop both take 4 hops to their final state; the gap is where each hop lands in the 500 ms relay cycle (final review corrected an earlier "more hops" explanation).
 - Each saga hop costs ~250 ms, mostly the relay's 500 ms poll.
+
+## M4
+
+Decisions made in the M4 plan (`docs/superpowers/plans/2026-10-12-m4-patterns.md`):
+
+- **Versions:** Spring Cloud 2025.0.3 (Gateway 4.3.5), Resilience4j 2.4.0; images `jaegertracing/jaeger:2.21.0`, `prom/prometheus:v3.14.0`, `grafana/grafana:12.4.11`, pulled through `mirror.gcr.io` (Docker Hub still blocked here), digests equal to Docker Hub. Images on disk: 2.99 GB -> 4.69 GB.
+- **Gateway artifact `spring-cloud-starter-gateway-server-webflux`**, routes under `spring.cloud.gateway.server.webflux.routes`.
+- **Aspect order = Resilience4j default** (Retry outside the circuit breaker); the fallback is on `@Retry`.
+- **Retry and breaker count only outages** (connection errors, timeouts, 5xx); a 404 stays a 400.
+- **`minimum-number-of-calls: 10`** (the default 100 would never open in a demo).
+- **Timeout on the RestClient** via a `RestClientCustomizer` (2 s), so the `MockRestServiceServer` unit test still works.
+- **Outbox trace context in `OutboxTracing`** (one per service): stores `traceparent` with the row, the relay continues it.
+- **OTLP to `localhost:4318`, sampling 100%**; tests keep tracing off except `OutboxTracingTest`.
+- **The outbox gauge is unit-tested** with a mocked repository; its export was checked live.
+- **Prometheus labels services by `job`**; HTTP histograms on for the p95 panel.
+- **`e2e-check.ps1` goes through the gateway.**
+
+Changed during the build:
+
+- **Resilience4j versions were mixed.** The Spring Cloud BOM manages Resilience4j modules at 2.2.0; pinning only `resilience4j-spring-boot3` 2.4.0 gave `NoClassDefFoundError` at start-up. Fixed by importing `resilience4j-bom` 2.4.0 before the Spring Cloud BOM (first import wins).
+- **Jaeger 2.21's query API is `/api/v3/...`** (`/api/services` is 404).
+- **Trace noise:** every outbox relay poll (500 ms, 3 services) became its own trace. Turned off with `management.observations.enable.tasks.scheduled.execution: false` in order, inventory and payment. Scrape traces (`/actuator/prometheus`) remain - filter them in the Jaeger search.
+- Two test fixes (not product bugs): the JDK `HttpServer` fakes need a thread pool (one thread queues slow requests into the next test); the gateway log test waits for the line (it is written in `doFinally`, after the response).
+
+Experiment findings (details in LEARNINGS sections 17-20):
+
+- E9: one trace, 20 spans, 5 services, ~3.3 s, crossing every outbox; the gaps before each "outbox publish" span are the relay's poll wait.
+- E8: breaker opened during the 3rd failed request (the window still held earlier successes), then 503 in ~35 ms; HALF_OPEN after 10 s, CLOSED after 3 good calls.
+- PromQL gotcha: the 503 series was born during the outage, so `increase()` showed 0 although the counter was 8 - the 5xx panel stayed flat.
+- Gateway: unknown paths (no route) are not access-logged; reactive log lines carry no trace id; proxied requests have `uri="UNKNOWN"` in metrics.
+- `OutboxTracingTest` exports a "test request" trace to Jaeger when Jaeger is running during the build - harmless.

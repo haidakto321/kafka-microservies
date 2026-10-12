@@ -45,6 +45,9 @@ management:
     distribution:
       percentiles-histogram:
         http.server.requests: true    # buckets for the p95 latency panel
+  observations:
+    enable:
+      tasks.scheduled.execution: false   # no trace for every outbox relay poll (every 500 ms) - it buried the real traces
   tracing:
     sampling:
       probability: 1.0                # demo: keep every trace (production: a few percent)

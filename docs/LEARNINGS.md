@@ -907,6 +907,335 @@ team would have to find and fix it.
 
 ---
 
+## 17. The API gateway
+
+### What it is
+
+One entry point in front of all services. The client calls only
+`http://localhost:8080/api/...`; the gateway sends each request to the right
+service (**routing**) and can do things every request needs (**filters**: logs,
+auth, rate limits, CORS).
+
+### Why it exists
+
+Without it, clients must know every service's address and port, and every
+service repeats the same cross-cutting code. The gateway hides the inside and
+does that code once.
+
+### How it works here
+
+```
+client --> api-gateway :8080 --/api/orders/**   (StripPrefix=1) --> order-service :8081 /orders/**
+                             --/api/products/** (StripPrefix=1) --> inventory     :8082 /products/**
+```
+
+- Spring Cloud Gateway is **its own Spring Boot app** (`api-gateway`), not a
+  library inside the services. It runs on **Netty** and is **reactive**
+  (WebFlux): a few threads serve many requests, because no thread waits for a
+  slow backend.
+- Routes are configuration (`spring.cloud.gateway.server.webflux.routes` in
+  `application.yml`) - no Java code.
+- `AccessLogFilter` is a `GlobalFilter` (runs for every route): one line per
+  request - method, path, status, duration. Reactive detail: `chain.filter(...)`
+  returns at once; the line is written in `doFinally`, when the response is done.
+
+### What I saw
+
+- `POST /api/orders -> 202 in 296 ms` (first call, warm-up), then
+  `GET /api/orders/<id> -> 200 in 17 ms`. The end-to-end check now goes through
+  the gateway and passes.
+- An unknown path (`/api/nothing`) is answered 404 but is **not** in the access
+  log: global filters run only when a route matches.
+- The gateway's log lines have an **empty trace id**: in reactive code the trace
+  is carried in the Reactor context, not in the thread's logging context, so a
+  plain `log.info` in `doFinally` cannot see it. (The trace itself is fine - the
+  gateway spans are in Jaeger.)
+- In Prometheus the gateway labels proxied requests `uri="UNKNOWN"` - it has no
+  URI template like a controller has.
+
+### Interview answer
+
+> "An API gateway is the single entry point: it routes requests to the services
+> and handles cross-cutting concerns like logging, auth and rate limiting in one
+> place. I used Spring Cloud Gateway - a separate reactive Spring Boot app on
+> Netty - with configured routes and one custom global filter for access logs."
+
+### Common follow-up questions
+
+- *"Gateway vs load balancer?"* - A load balancer spreads traffic over several
+  instances of the same service (HAProxy, NGINX, AWS ALB). A gateway routes by
+  path/headers to **different** services and runs filters. A gateway can also
+  balance load (with service discovery); in production you often run several
+  gateways **behind** a load balancer.
+- *"Isn't the gateway a single point of failure?"* - Yes, so run more than one
+  instance and keep it thin - no business logic.
+
+---
+
+## 18. Timeout, retry and circuit breaker (Resilience4j)
+
+### What it is
+
+- **Timeout**: stop waiting after a fixed time (here 2 s).
+- **Retry**: try a failed call again (here up to 3 attempts, 200 ms apart).
+- **Circuit breaker**: after too many failures, stop calling the sick service
+  for a while and fail at once. States: **CLOSED** (normal) -> **OPEN** (fail
+  fast) -> **HALF_OPEN** (let a few test calls through) -> CLOSED again.
+- **Fallback**: what to do when the call fails - here a fast **503 "Product
+  service unavailable, try again"**. It never guesses a price.
+
+### Why it exists
+
+order-service calls inventory over REST to get the price. If inventory hangs,
+every order request hangs too, threads pile up and order-service dies as well
+(a **cascading failure**). The breaker stops that and gives inventory time to
+recover.
+
+### How it works here
+
+`ProductClient.getProduct` has `@Retry(name = "inventory", fallbackMethod =
+"unavailable")` and `@CircuitBreaker(name = "inventory")`; the numbers are in
+`application.yml`:
+
+| Setting | Value |
+|---|---|
+| Timeout (connect + read) | 2 s (`inventory.timeout`, set on the RestClient) |
+| Retry | 3 attempts, 200 ms wait, only on connection errors, timeouts, 5xx |
+| Breaker window | last 10 calls, at least 10 calls, opens at 50% failures |
+| Open for | 10 s, then HALF_OPEN by itself, 3 test calls |
+
+- **Aspect order matters.** Resilience4j's default is `Retry( CircuitBreaker(
+  call ) )`: the retry is **outside**, so the breaker counts **every attempt** -
+  3 per request, so it opens after about 4 failed requests. The other style puts
+  the breaker around the whole retry, `CircuitBreaker( Retry( call ) )`: one
+  request counts once (opens later), but when it is open it also stops the
+  retries at once. Know both.
+- The fallback sits on `@Retry` (the outer one). On the inner `@CircuitBreaker`
+  it would turn the error into a 503 **before** Retry sees it, and nothing would
+  ever be retried.
+- Only outages count: a **404** is an answer ("no such product"), so it is not
+  retried, not counted by the breaker, and the client gets 400 "Product 99 not
+  found".
+- The state is on `/actuator/circuitbreakers`, and in Grafana.
+- Build note: the Spring Cloud BOM also manages Resilience4j (older version).
+  Mixed versions failed at start-up (`NoClassDefFoundError`); importing
+  `resilience4j-bom` **before** the Spring Cloud BOM fixed it - the first BOM
+  import wins.
+
+### What I saw (E8)
+
+- What I did: killed inventory, sent 8 orders through the gateway, started
+  inventory again, sent 4 more.
+- What I saw:
+
+  | Request | Time | Answer | Breaker after |
+  |---|---|---|---|
+  | 1 | 609 ms | 503 | CLOSED |
+  | 2 | 454 ms | 503 | CLOSED |
+  | 3 | 244 ms | 503 | **OPEN** |
+  | 4-8 | 31-40 ms | 503 | OPEN |
+  | (inventory back, 10 s later) | | | HALF_OPEN |
+  | 1-2 | 227, 48 ms | 202 | HALF_OPEN |
+  | 3-4 | 47, 46 ms | 202 | **CLOSED** |
+
+- Why:
+  - Requests 1-2 tried 3 times each (connection refused is fast, so ~0.5 s
+    including the 200 ms waits).
+  - It opened during request 3, earlier than "about 4": the window of the last
+    10 calls still held **successful** calls from the end-to-end check, so 50%
+    was reached sooner.
+  - Open = inventory is not called at all; 30-40 ms is just the gateway and
+    order-service.
+  - Prometheus showed `state="open"` = 1 at 08:23:15-20 and `half_open` at
+    08:23:25-35 (one sample every 5 s).
+
+### Interview answer
+
+> "I protect the synchronous call with a 2-second timeout, a retry with only 3
+> attempts for real outages, and a circuit breaker. When the breaker is open the
+> call fails fast with a 503 instead of hanging - that stops a slow service from
+> taking the caller down with it. In Resilience4j the default order is retry
+> outside the breaker, so every attempt counts."
+
+### Common follow-up questions
+
+- *"Can retries make things worse?"* - Yes: a struggling service gets 3x the
+  traffic (a **retry storm**). That is why retries need a small limit, a wait
+  between them, and a breaker.
+- *"How long should the timeout be?"* - Shorter than the caller's own timeout,
+  and long enough for the normal slow case. Measure p99 latency first.
+- *"What does the fallback return?"* - Something honest: an error the client can
+  act on, a cached value, or a default. Never invent data like a price.
+
+---
+
+## 19. Tracing - Micrometer Tracing, OpenTelemetry, Jaeger
+
+### What it is
+
+- A **trace** is the story of one request across all services. It is a tree of
+  **spans**; a span is one timed step (an HTTP call, a Kafka send, ...). All
+  spans of a trace share one **trace id**.
+- **Micrometer Tracing** is the Spring API for tracing; the **OpenTelemetry
+  bridge** is the implementation under it; **OTLP** is the format used to send
+  spans; **Jaeger** stores the spans and shows them on a timeline.
+
+### Why it exists
+
+One order touches 5 services and 4 topics. When it is slow or fails, logs of 5
+apps are hard to join. A trace shows the whole path, with times, in one picture.
+
+### How it works here
+
+- Every service: `micrometer-tracing-bridge-otel` + `opentelemetry-exporter-otlp`,
+  sampling 100%, spans sent to `http://localhost:4318/v1/traces` (Jaeger).
+- **HTTP**: the trace id travels in the `traceparent` header - automatic for the
+  gateway and for the RestClient call to inventory.
+- **Kafka**: with `spring.kafka.template.observation-enabled` and
+  `listener.observation-enabled`, the producer writes `traceparent` into the
+  record headers and the consumer continues the trace.
+- **Across the outbox** (the hard part): the outbox row is sent later, by the
+  relay's own thread, so the trace would stop at the database. `OutboxTracing`
+  stores the current `traceparent` in `outbox_event.trace_parent` when the row is
+  written, and the relay starts an "outbox publish ..." span **from that value**
+  when it sends the row. The Kafka producer span becomes its child and the trace
+  goes on.
+- Every log line has `[traceId-spanId]`, so a log line leads to its trace.
+- Noise found and removed: each relay poll (every 500 ms in 3 services) created
+  its own trace and buried the real ones in Jaeger's search. Fixed with
+  `management.observations.enable.tasks.scheduled.execution: false`. (Each
+  Prometheus scrape still creates a small `/actuator/prometheus` trace - filter
+  it out in the Jaeger search.)
+
+### What I saw (E9)
+
+- What I did: placed one Keyboard order through the gateway, took the trace id
+  from the order-service log line, opened it in Jaeger
+  (`/api/v3/traces/<id>` - Jaeger 2.x's query API).
+- What I saw: **one trace, 20 spans, all 5 services, 3.4 s**:
+
+  ```
+      0 ms  api-gateway          http post                      297 ms
+      8     order-service        http post /orders               287
+     98     order-service          http get (RestClient)          77
+    147     inventory-service        http get /products/{id}       7
+    641     order-service        outbox publish ReserveStock     73
+    648     order-service          inventory-commands send       67
+    731     inventory-service        inventory-commands receive  340
+   1514     inventory-service    outbox publish StockReserved    75
+   1593     order-service          saga-replies receive         317
+   2275     order-service        outbox publish ChargePayment     6
+   2295     payment-service          payment-commands receive   368
+   2868     payment-service      outbox publish PaymentSucceeded 66
+   2931     order-service          saga-replies receive          15
+   3315     order-service        outbox publish OrderConfirmed    6
+   3336     notification-service     order-events receive         48
+  ```
+- Why:
+  - The trace crosses every outbox: each "outbox publish" span continues the
+    trace stored in the row.
+  - The **gaps** before each "outbox publish" (e.g. 1071 -> 1514 ms) are the
+    time the row waited for the relay's next poll (every 500 ms) - exactly the
+    latency explained in section 13, now visible.
+  - The first receives are slow (300+ ms) because this was the first order after
+    start (JVM warm-up); later orders are faster.
+
+### How to read a Jaeger timeline
+
+Each row is a span; indentation = parent/child; the bar's length = time; empty
+space between bars = waiting. Click a span to see its tags (topic, partition,
+HTTP status, error).
+
+### Interview answer
+
+> "I use Micrometer Tracing with the OpenTelemetry bridge and send spans over
+> OTLP to Jaeger. The trace id travels in the traceparent header over HTTP and in
+> Kafka record headers. The outbox breaks the trace because the relay sends the
+> message later, so I store the traceparent in the outbox row and continue it
+> when the relay publishes."
+
+### Common follow-up questions
+
+- *"Sampling in production?"* - Keep only a few percent of traces (cost), or use
+  tail sampling to keep the slow and failed ones.
+- *"Traces vs logs?"* - See section 21.
+
+---
+
+## 20. Metrics - Prometheus and Grafana
+
+### What it is
+
+- A **metric** is a number over time (requests per second, rows waiting).
+  **Labels** split it (`job="order-service"`, `status="503"`).
+- **Prometheus** collects and stores metrics. It **pulls** ("scrapes"): every 5 s
+  it calls each service's `/actuator/prometheus`.
+- **Grafana** draws dashboards. It stores no metrics: a **data source**
+  (Prometheus) answers its queries, and each **panel** shows one query.
+
+### Why it exists
+
+Metrics answer "is something wrong right now?" cheaply - and they can trigger
+alerts. A dashboard shows the health of all services on one screen.
+
+### How it works here
+
+- Every service: `micrometer-registry-prometheus`; `prometheus/prometheus.yml`
+  lists the 5 services as jobs (`host.docker.internal:808x`, because Prometheus
+  runs in Docker and the services on the host).
+- Grafana is **provisioned from files** in `grafana/` (data source + dashboard
+  JSON) - no clicking. Dashboard: `http://localhost:3000/d/kafka-demo`.
+- Metric types: **counter** (only goes up - requests), **gauge** (up and down -
+  rows waiting), **histogram** (buckets of durations - for percentiles).
+- Custom gauge `outbox_unpublished` (`OutboxMetrics`): rows not sent yet, read on
+  every scrape. Near 0 = healthy; growing = Kafka unreachable.
+- Kafka consumer lag comes from the Kafka client metrics
+  (`kafka_consumer_fetch_manager_records_lag`), circuit breaker state from
+  Resilience4j (`resilience4j_circuitbreaker_state`).
+- The six panels and their PromQL:
+
+  | Panel | Query | Meaning |
+  |---|---|---|
+  | Requests/s | `sum by (job) (rate(http_server_requests_seconds_count[1m]))` | per-second rate of the counter over the last minute, one line per service |
+  | p95 latency | `histogram_quantile(0.95, sum by (le, job) (rate(http_server_requests_seconds_bucket[1m])))` | 95% of requests were faster than this |
+  | 5xx/s | same as requests, with `{status=~"5.."}` | errors per second |
+  | Consumer lag | `sum by (job, topic) (kafka_consumer_fetch_manager_records_lag)` | messages waiting per consumer group and topic |
+  | Breaker state | `resilience4j_circuitbreaker_state{name="inventory"}` | the current state's line is 1 |
+  | Outbox | `outbox_unpublished` | rows waiting per service |
+
+### What I saw
+
+- All 5 targets `up`; `outbox_unpublished` = 0 in order, inventory and payment.
+- During E8 the breaker panel showed OPEN, then HALF_OPEN, then CLOSED.
+- **Gotcha:** the 5xx panel stayed flat during E8, although order-service
+  counted 8 responses with status 503. The `status="503"` series did not exist
+  before the outage, so its first value (8) is never seen as an increase -
+  `rate()` and `increase()` need two samples of the **same** series. Systems that
+  care pre-create such series at 0, or alert on the total instead.
+
+### Interview answer
+
+> "Each service exposes Micrometer metrics on /actuator/prometheus; Prometheus
+> scrapes them every few seconds; Grafana shows dashboards with PromQL queries -
+> request rate, p95 latency, errors, Kafka consumer lag, circuit breaker state,
+> and a custom gauge for outbox rows waiting."
+
+---
+
+## 21. Traces vs metrics vs logs
+
+| | Answers | Cost | Here |
+|---|---|---|---|
+| **Metrics** | "Is something wrong? How much?" | cheap - just numbers | Prometheus + Grafana, alerts |
+| **Traces** | "Where is it slow or failing, for this request?" | medium - sampled | Jaeger |
+| **Logs** | "What exactly happened?" | expensive - text | log files, joined to a trace by the trace id |
+
+Usual flow: a metric or alert says something is wrong -> a trace shows which
+service and step -> the logs of that step (found by trace id) show the details.
+Central log storage (ELK, Loki) is out of scope here.
+
+---
+
 ## Glossary
 
 | Term | Short meaning |
@@ -945,11 +1274,28 @@ team would have to find and fix it.
 | Compensation | A new command that undoes an already-committed step (here ReleaseStock) |
 | Fan-out | One topic read by several consumer groups; each gets every message |
 | 202 Accepted | "Request accepted, work still running" - the client polls for the result |
+| API gateway | Single entry point that routes requests to services and runs shared filters |
+| Circuit breaker | Stops calling a failing service for a while and fails fast (CLOSED / OPEN / HALF_OPEN) |
+| Half-open | Breaker state that lets a few test calls through to see if the service is back |
+| Retry | Trying a failed call again, a limited number of times |
+| Timeout | The longest time to wait for an answer |
+| Fallback | What to return or throw when the protected call fails |
+| Trace | The path of one request across services, made of spans |
+| Span | One timed step of a trace |
+| traceparent | The W3C header that carries the trace id and parent span id |
+| OpenTelemetry (OTel) | The standard (and libraries) for traces, metrics and logs |
+| OTLP | OpenTelemetry's protocol for sending telemetry (here spans to Jaeger) |
+| Jaeger | Stores traces and shows them on a timeline |
+| Prometheus | Scrapes and stores metrics; queried with PromQL |
+| Scrape | Prometheus pulling metrics from an endpoint |
+| Metric / label | A number over time / a key=value that splits it |
+| PromQL | Prometheus' query language (rate, sum by, histogram_quantile) |
+| Gauge | A metric that goes up and down (here outbox_unpublished) |
+| Grafana | Dashboards over data sources like Prometheus |
+| Panel | One chart on a Grafana dashboard |
 
 ---
 
 ## Coming in the next milestones
 
-- M4: Spring Cloud Gateway, Resilience4j, Micrometer Tracing + OpenTelemetry,
-  Jaeger, Prometheus, Grafana, experiments E8 and E9.
 - M5: interview Q&A collected from every section, and next steps.

@@ -1,8 +1,8 @@
-# End-to-end check (spec 11): the happy path and both failure paths, through all 4 services.
+# End-to-end check (spec 11) through the api-gateway: the happy path and both failure paths.
 # Run .\scripts\start-infra.ps1 and .\scripts\start-services.ps1 first.
 param(
-    [string]$OrderUrl = 'http://localhost:8081',
-    [string]$InventoryUrl = 'http://localhost:8082'
+    [string]$OrderUrl = 'http://localhost:8080/api',
+    [string]$InventoryUrl = 'http://localhost:8080/api'
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
