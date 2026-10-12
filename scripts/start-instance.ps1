@@ -11,6 +11,10 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $jar = Get-ChildItem "$root\$Service\target\$Service-*.jar" | Where-Object { $_.Name -notlike '*.original' } | Select-Object -First 1
 if (-not $jar) { throw "No jar for $Service - run .\scripts\start-services.ps1 first (it builds)" }
+# On a taken port the new instance would die, and an old instance there would still answer.
+if (Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue) {
+    throw "Port $Port is already in use - pick another port, or stop the old instance (.\scripts\stop-services.ps1)"
+}
 
 $java = 'C:\Program Files\Eclipse Adoptium\jdk-21.0.4.7-hotspot\bin\java.exe'
 New-Item -ItemType Directory -Force -Path "$root\logs" | Out-Null

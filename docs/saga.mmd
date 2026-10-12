@@ -11,7 +11,8 @@ sequenceDiagram
     G->>O: POST /orders
     O->>I: GET /products/{id} (price)
     I-->>O: 200 price
-    O-->>C: 202 PENDING (order + ReserveStock saved in one transaction)
+    O-->>G: 202 PENDING (order + ReserveStock saved in one transaction)
+    G-->>C: 202 PENDING
     O-)I: ReserveStock (outbox -> inventory-commands)
     alt enough stock
         I-)O: StockReserved (saga-replies)
@@ -34,5 +35,6 @@ sequenceDiagram
     loop until the status is final
         C->>G: GET /api/orders/{id}
         G->>O: GET /orders/{id}
-        O-->>C: status
+        O-->>G: status
+        G-->>C: status
     end

@@ -98,7 +98,8 @@ sequenceDiagram
     G->>O: POST /orders
     O->>I: GET /products/{id} (price)
     I-->>O: 200 price
-    O-->>C: 202 PENDING (order + ReserveStock saved in one transaction)
+    O-->>G: 202 PENDING (order + ReserveStock saved in one transaction)
+    G-->>C: 202 PENDING
     O-)I: ReserveStock (outbox -> inventory-commands)
     alt enough stock
         I-)O: StockReserved (saga-replies)
@@ -121,7 +122,8 @@ sequenceDiagram
     loop until the status is final
         C->>G: GET /api/orders/{id}
         G->>O: GET /orders/{id}
-        O-->>C: status
+        O-->>G: status
+        G-->>C: status
     end
 ```
 
@@ -137,14 +139,14 @@ flowchart LR
     JAEGER["<b>Jaeger</b><br/>:16686 traces"]:::teal
     PROM["<b>Prometheus</b><br/>:9090 metrics"]:::teal
     GRAF["<b>Grafana</b><br/>:3000 dashboard kafka-demo"]:::teal
-    KAFKA["<b>Kafka</b><br/>:9092"]:::amber
+    KAFKA["<b>Kafka</b><br/>localhost:9092 for the services<br/>kafka:29092 inside Docker"]:::amber
     CONSOLE["<b>Redpanda Console</b><br/>:8090 Kafka UI"]:::teal
     YOU["<b>You</b><br/>browser"]:::grey
 
     OTEL ==>|OTLP spans :4318| JAEGER
     PROM -->|scrape every 5 s| ACT
     GRAF -->|PromQL| PROM
-    CONSOLE -->|topics, lag, produce| KAFKA
+    CONSOLE -->|kafka:29092 - topics, lag, produce| KAFKA
     YOU --> JAEGER
     YOU --> GRAF
     YOU --> CONSOLE

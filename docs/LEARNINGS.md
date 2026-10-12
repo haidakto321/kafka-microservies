@@ -1343,7 +1343,9 @@ broken.
 - Liveness follows Spring's `LivenessState`, readiness follows its
   `ReadinessState`, which turns UP only after the app has fully started.
 - `start-services.ps1` polls `/actuator/health/readiness` on all 5 ports and says
-  "ready" only when all of them answer UP (it gives up after 120 s).
+  "ready" only when all of them answer UP (it gives up after 120 s). It refuses to
+  start when a port is already taken - an old instance there would answer UP for
+  a new one that died - and it stops waiting at once when a started process exits.
 - **What readiness does not check here:** it is only Spring's `ReadinessState`.
   It does not look at the database, Kafka or the circuit breaker, and it is UP
   before the Kafka consumers have their partitions (after a force-kill that can
