@@ -21,4 +21,7 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, UUID> 
             FOR UPDATE SKIP LOCKED
             """, nativeQuery = true)
     List<OutboxEvent> lockUnpublished(@Param("limit") int limit);
+
+    /** For the outbox.unpublished gauge (Grafana). Fast thanks to the partial index. */
+    long countByPublishedAtIsNull();
 }

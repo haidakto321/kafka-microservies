@@ -2,6 +2,8 @@ package com.kafkademo.payment.outbox;
 
 import com.kafkademo.contracts.EnvelopeCodec;
 import com.kafkademo.contracts.MessageEnvelope;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
 import java.time.Clock;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
@@ -20,6 +22,7 @@ import org.springframework.transaction.annotation.Transactional;
  * and mark the sent ones. It stops at the first failure (e.g. Kafka is down): the rest wait for the next run,
  * so a newer message never overtakes an older one.
  * Trade-off: the DB transaction stays open while talking to Kafka. Simple, and fine for a demo (see LEARNINGS).
+ * Each send runs in a span that continues the trace stored in the row (spec 7.3).
  */
 @Component
 public class OutboxRelay {
@@ -31,13 +34,15 @@ public class OutboxRelay {
     private final KafkaTemplate<String, String> kafka;
     private final EnvelopeCodec codec;
     private final Clock clock;
+    private final OutboxTracing tracing;
 
     public OutboxRelay(OutboxEventRepository outbox, KafkaTemplate<String, String> kafka, EnvelopeCodec codec,
-                       Clock clock) {
+                       Clock clock, OutboxTracing tracing) {
         this.outbox = outbox;
         this.kafka = kafka;
         this.codec = codec;
         this.clock = clock;
+        this.tracing = tracing;
     }
 
     @Scheduled(fixedDelay = 500)
@@ -60,7 +65,8 @@ public class OutboxRelay {
     private boolean send(OutboxEvent event) {
         MessageEnvelope envelope = codec.envelope(event.getId(), event.getType(), event.getAggregateId(),
                 event.getCreatedAt(), event.getPayload());
-        try {
+        Span span = tracing.startPublishSpan(event);
+        try (Tracer.SpanInScope scope = tracing.inScope(span)) {
             // .get(...) waits for the broker to confirm the write (acks=all).
             kafka.send(event.getTopic(), event.getAggregateId().toString(), codec.toJson(envelope))
                     .get(10, TimeUnit.SECONDS);
@@ -73,7 +79,10 @@ public class OutboxRelay {
             // toString(), not getMessage(): a TimeoutException has no message and would log "null".
             log.warn("Outbox relay: could not send {} {} for order {} - will try again: {}",
                     event.getType(), event.getId(), event.getAggregateId(), e.toString());
+            span.error(e);
             return false;
+        } finally {
+            span.end();
         }
     }
 }

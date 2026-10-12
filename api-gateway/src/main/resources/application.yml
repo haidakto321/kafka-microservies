@@ -1,0 +1,39 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            - id: orders
+              uri: ${services.order-url:http://localhost:8081}
+              predicates:
+                - Path=/api/orders/**
+              filters:
+                - StripPrefix=1         # /api/orders/1 -> /orders/1
+            - id: products
+              uri: ${services.inventory-url:http://localhost:8082}
+              predicates:
+                - Path=/api/products/**
+              filters:
+                - StripPrefix=1
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true    # buckets for the p95 latency panel
+  tracing:
+    sampling:
+      probability: 1.0                # demo: keep every trace (production: a few percent)
+  otlp:
+    tracing:
+      endpoint: http://localhost:4318/v1/traces    # Jaeger's OTLP/HTTP port

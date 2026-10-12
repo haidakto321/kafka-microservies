@@ -29,7 +29,10 @@ spring:
       auto-offset-reset: earliest     # a new group starts from the oldest message
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    template:
+      observation-enabled: true       # producer span + trace id written into the Kafka headers
     listener:
+      observation-enabled: true       # consumer span continues the trace from the headers
       ack-mode: record                # commit the offset after each message is processed
 
 logging:
@@ -38,3 +41,19 @@ logging:
 
 demo:
   processing-delay-ms: 0              # experiments E1/E6: pause after each command, before the offset commit
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true    # buckets for the p95 latency panel
+  tracing:
+    sampling:
+      probability: 1.0                # demo: keep every trace (production: a few percent)
+  otlp:
+    tracing:
+      endpoint: http://localhost:4318/v1/traces    # Jaeger's OTLP/HTTP port

@@ -26,9 +26,28 @@ spring:
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    template:
+      observation-enabled: true       # producer span + trace id written into the Kafka headers
     listener:
+      observation-enabled: true       # consumer span continues the trace from the headers
       ack-mode: record
 
 logging:
   level:
     org.apache.kafka: WARN
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true    # buckets for the p95 latency panel
+  tracing:
+    sampling:
+      probability: 1.0                # demo: keep every trace (production: a few percent)
+  otlp:
+    tracing:
+      endpoint: http://localhost:4318/v1/traces    # Jaeger's OTLP/HTTP port

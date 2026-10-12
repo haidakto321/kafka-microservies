@@ -33,17 +33,22 @@ public class OutboxEvent {
     /** null = not sent yet. */
     private Instant publishedAt;
 
+    /** The W3C trace context of the request that wrote the row (null if none) - the relay continues it. */
+    private String traceParent;
+
     protected OutboxEvent() {
         // for JPA
     }
 
-    public OutboxEvent(UUID id, UUID aggregateId, String topic, String type, String payload, Instant createdAt) {
+    public OutboxEvent(UUID id, UUID aggregateId, String topic, String type, String payload, Instant createdAt,
+                       String traceParent) {
         this.id = id;
         this.aggregateId = aggregateId;
         this.topic = topic;
         this.type = type;
         this.payload = payload;
         this.createdAt = createdAt;
+        this.traceParent = traceParent;
     }
 
     public void markPublished(Instant now) {
@@ -76,5 +81,9 @@ public class OutboxEvent {
 
     public Instant getPublishedAt() {
         return publishedAt;
+    }
+
+    public String getTraceParent() {
+        return traceParent;
     }
 }

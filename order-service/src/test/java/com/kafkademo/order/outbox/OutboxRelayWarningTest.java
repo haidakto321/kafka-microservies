@@ -40,11 +40,11 @@ class OutboxRelayWarningTest {
         when(neverConfirmed.get(anyLong(), any(TimeUnit.class))).thenThrow(new TimeoutException());
         when(kafka.send(anyString(), anyString(), anyString())).thenReturn(neverConfirmed);
         OutboxEvent event = new OutboxEvent(UUID.randomUUID(), UUID.randomUUID(), Topics.INVENTORY_COMMANDS,
-                MessageTypes.RESERVE_STOCK, "{\"productId\":1,\"quantity\":1}", Instant.now());
+                MessageTypes.RESERVE_STOCK, "{\"productId\":1,\"quantity\":1}", Instant.now(), null);
         when(outbox.lockUnpublished(anyInt())).thenReturn(List.of(event));
         EnvelopeCodec codec = new EnvelopeCodec(new ObjectMapper().findAndRegisterModules());
 
-        new OutboxRelay(outbox, kafka, codec, Clock.systemUTC()).publishPending();
+        new OutboxRelay(outbox, kafka, codec, Clock.systemUTC(), OutboxTracing.none()).publishPending();
 
         assertThat(event.getPublishedAt()).isNull();
         assertThat(output).contains("will try again: java.util.concurrent.TimeoutException");
