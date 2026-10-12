@@ -33,6 +33,7 @@ The "Interview answer" parts are collected in [Interview Q&A](#interview-qa); a
 - [19. Tracing - Micrometer Tracing, OpenTelemetry, Jaeger](#19-tracing---micrometer-tracing-opentelemetry-jaeger)
 - [20. Metrics - Prometheus and Grafana](#20-metrics---prometheus-and-grafana)
 - [21. Traces vs metrics vs logs](#21-traces-vs-metrics-vs-logs)
+- [22. Health probes (liveness and readiness)](#22-health-probes-liveness-and-readiness)
 - [Interview Q&A](#interview-qa)
 - [2-minute pitch](#2-minute-pitch)
 - [Next steps](#next-steps)
@@ -944,9 +945,12 @@ registry** (Avro / JSON Schema / Protobuf) that checks every change stays
 compatible.
 
 **A contract bug I hit in M3:** money lost its scale on both sides. When sending,
-Jackson stripped the zeros (`"amount":1E+2` on the wire - Redpanda Console or a
-non-Java consumer would see that); when reading, it read a decimal inside a
-`JsonNode` as a `double`, so `100.00` came back as `100.0`. Doubles can also lose precision for money. The fix lives in one
+Jackson's JSON tree stripped the trailing zeros (`100.00` became `1E+2`), and the
+outbox `jsonb` column then stored that number as `100` - so Redpanda Console or a
+non-Java consumer saw `"amount": 100` on the wire. (Checked in PostgreSQL:
+`'{"amount": 1E+2}'::jsonb` gives `{"amount": 100}`, while `100.00` keeps its
+zeros.) When reading, Jackson read a decimal inside a `JsonNode` as a `double`, so
+`100.00` came back as `100.0`. Doubles can also lose precision for money. The fix lives in one
 place, the shared `EnvelopeCodec`: read decimals as `BigDecimal` and keep their
 trailing zeros. A shared module made the fix easy; with copied classes every
 team would have to find and fix it.
@@ -1278,8 +1282,9 @@ alerts. A dashboard shows the health of all services on one screen.
   counted 8 responses with status 503. The `status="503"` series did not exist
   before the outage, so its first value (8) is never seen as an increase -
   `rate()` and `increase()` need two samples of the **same** series. Systems that
-  care pre-create such series at 0, or compare the counter with its value a few
-  minutes ago (`max_over_time`, `absent()` patterns) instead of using `rate()`.
+  care pre-create such series at 0, or compare with an older sample using
+  `offset`: `x unless x offset 5m` shows the series that are new in the last 5
+  minutes, and `x - (x offset 5m or x * 0)` counts a new series from 0.
 
 ### Interview answer
 
@@ -1296,11 +1301,81 @@ alerts. A dashboard shows the health of all services on one screen.
 |---|---|---|---|
 | **Metrics** | "Is something wrong? How much?" | cheap - just numbers | Prometheus + Grafana, alerts |
 | **Traces** | "Where is it slow or failing, for this request?" | medium - sampled | Jaeger |
-| **Logs** | "What exactly happened?" | expensive - text | log files, joined to a trace by the trace id |
+| **Logs** | "What exactly happened?" | expensive - text | log files, joined to a trace by the trace id (not in the gateway - section 17) |
 
 Usual flow: a metric or alert says something is wrong -> a trace shows which
 service and step -> the logs of that step (found by trace id) show the details.
 Central log storage (ELK, Loki) is out of scope here.
+
+### Interview answer
+
+> "Metrics tell me that something is wrong and how much - they are cheap and
+> drive the alerts. A trace shows where one request was slow or failed across the
+> services. Logs give the details of that step, and I find them by the trace id
+> in the log lines - as long as the logging context carries it; reactive code,
+> like my gateway, needs extra setup for that."
+
+---
+
+## 22. Health probes (liveness and readiness)
+
+### What it is
+
+Two health endpoints that a platform (Kubernetes, a load balancer, a script) asks:
+
+- **Liveness** - `/actuator/health/liveness`: "Is the app alive, or stuck? If DOWN,
+  restart me."
+- **Readiness** - `/actuator/health/readiness`: "Can I take traffic now? If DOWN,
+  stop sending me requests - but do not restart me."
+
+### Why it exists
+
+A running process is not always a useful one. It may still be starting (Flyway,
+Kafka consumers joining), or be stuck. Two separate answers let the platform wait
+for a starting app without killing it, and restart only an app that is really
+broken.
+
+### How it works here
+
+- Spring Boot turns the probes on by itself only on Kubernetes. Every service here
+  sets `management.endpoint.health.probes.enabled: true`, so they work on my
+  laptop too.
+- Liveness follows Spring's `LivenessState`, readiness follows its
+  `ReadinessState`, which turns UP only after the app has fully started.
+- `start-services.ps1` polls `/actuator/health/readiness` on all 5 ports and says
+  "ready" only when all of them answer UP (it gives up after 120 s).
+- **What readiness does not check here:** it is only Spring's `ReadinessState`.
+  It does not look at the database, Kafka or the circuit breaker, and it is UP
+  before the Kafka consumers have their partitions (after a force-kill that can
+  take ~45 s - section 3). A dependency can be added to the readiness group
+  (`management.endpoint.health.group.readiness.include=readinessState,db`), but
+  then a database outage takes **every** instance out of traffic at once.
+- **Never put the database in liveness:** restarting the app does not fix the
+  database. Kubernetes would only restart every instance, again and again.
+
+### What I saw
+
+- `start-services.ps1` waits on readiness for all 5 services; the end-to-end check
+  that runs after it passes.
+- `HealthProbesTest` (order-service): both endpoints answer 200 with status UP.
+
+### Interview answer
+
+> "Liveness answers 'should you restart me?' and readiness answers 'should you
+> send me traffic?'. In Spring Boot both are actuator health groups, on by
+> default on Kubernetes; I turned them on explicitly. I keep external systems
+> like the database out of liveness - a restart does not fix the database, it
+> only causes a restart loop. Readiness covers startup, and I would add a
+> dependency to it only if traffic really must stop when that dependency is down."
+
+### Common follow-up questions
+
+- *"What is a startup probe?"* - A third Kubernetes probe for slow starters: until
+  it passes, liveness is not checked, so a slow start is not taken for a hang.
+- *"Your readiness is UP but Kafka is down - is that wrong?"* - Not for this app:
+  the HTTP API still works, the outbox keeps the messages and sends them later
+  (experiment E4). Taking the instance out of traffic would turn a Kafka outage
+  into a full API outage.
 
 ---
 
@@ -1422,7 +1497,17 @@ Say it in your own words; the section has the follow-up questions.
 > "Metrics tell me that something is wrong and how much - they are cheap and
 > drive the alerts. A trace shows where one request was slow or failed across the
 > services. Logs give the details of that step, and I find them by the trace id
-> that is in every log line."
+> in the log lines - as long as the logging context carries it; reactive code,
+> like my gateway, needs extra setup for that."
+
+**Q: What are liveness and readiness probes?** (section 22)
+
+> "Liveness answers 'should you restart me?' and readiness answers 'should you
+> send me traffic?'. In Spring Boot both are actuator health groups, on by
+> default on Kubernetes; I turned them on explicitly. I keep external systems
+> like the database out of liveness - a restart does not fix the database, it
+> only causes a restart loop. Readiness covers startup, and I would add a
+> dependency to it only if traffic really must stop when that dependency is down."
 
 ---
 
@@ -1448,7 +1533,8 @@ Say it in your own words; the section has the follow-up questions.
 > killed a service after its commit, the message was delivered again and skipped as
 > a duplicate. With the inventory service down, the breaker opened and answered in
 > about 35 milliseconds. One order is one trace of 20 spans across all five
-> services. There are 106 automated tests with Testcontainers.
+> services. There are 106 automated tests; the integration tests run real Kafka
+> and PostgreSQL with Testcontainers.
 >
 > Next I would replace the polling relay with change data capture, add saga
 > timeouts, and deploy it on Kubernetes - the health probes are already there."
@@ -1464,7 +1550,7 @@ Say it in your own words; the section has the follow-up questions.
 - **Saga timeouts**: cancel and compensate orders stuck in a state (section 13).
 - **Login at the gateway** (OAuth2 / Keycloak, the gateway as resource server).
 - **AWS deployment** (MSK, RDS, ECS) and **Kubernetes** (the liveness/readiness
-  probes are ready).
+  probes are ready - section 22).
 - The small deferred review items listed per milestone in `docs/implementation-notes.md`.
 
 ---

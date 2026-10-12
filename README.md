@@ -78,9 +78,9 @@ flowchart TB
     linkStyle 4 stroke:#16a34a,stroke-width:3px
 ```
 
-The green arrow is the outbox path: order-service never sends to Kafka inside a
-request - it saves the order and the message in one transaction, and a relay
-sends the message (sources of all diagrams: `docs/*.mmd`).
+The green arrow is the first outbox hop, and every "outbox relay" arrow works the
+same way: a service never sends to Kafka inside a request or a listener - it saves
+its data and the message in one transaction, and a relay sends the message (sources of all diagrams: `docs/*.mmd`).
 
 ### The order saga
 
@@ -177,7 +177,7 @@ mug (always out of stock).
 
 | What | Where |
 |---|---|
-| api-gateway (use this) | http://localhost:8080/api/orders, /api/products |
+| api-gateway (use this) | http://localhost:8080/api/products/1, /api/orders/{id} (POST /api/orders to order) |
 | order / inventory / payment / notification | http://localhost:8081 / 8082 / 8083 / 8084 (`/actuator/health`) |
 | Redpanda Console (Kafka UI) | http://localhost:8090 |
 | Jaeger (traces) | http://localhost:16686 |
@@ -186,8 +186,9 @@ mug (always out of stock).
 | PostgreSQL | localhost:5433, user `demo`, password `demo` |
 
 Helper scripts: `send-orders.ps1` (many orders), `outbox-status.ps1` (outbox rows
-waiting, per database), `start-instance.ps1 -ExtraArgs '--demo.processing-delay-ms=15000'`
-(a slow inventory, for experiments).
+waiting, per database), and
+`start-instance.ps1 -Service inventory-service -Port 8092 -ExtraArgs '--demo.processing-delay-ms=15000'`
+(one more inventory instance, slowed down - for experiments).
 
 ## Experiments
 
@@ -199,9 +200,9 @@ Every experiment was run and written up ("What I saw") in LEARNINGS.
 | E2 | Produce `hello` to a topic | in the DLT 5 ms later, no retries; the next order went through | 10 |
 | E3 | Produce the same message twice | both copies skipped | 9 |
 | E4 | Stop Kafka, place orders | 202 in ~20 ms; sent 0.5 s after Kafka came back | 8 |
-| E5 | 3, then 4 inventory instances | one partition each; the 4th idle; full reshuffle | 3 |
+| E5 | 3, then 4 inventory instances | one partition each; then one consumer idle (an old one, not the newcomer); full reshuffle | 3 |
 | E6 | 500 orders against a slow consumer | lag peaked at a few hundred, drained at 4.6 msg/s | 11 |
-| E7 | Follow one order's messages | same key, same partition, in every topic | 2 |
+| E7 | Follow one order's messages | same key, same partition number in every topic (only because every topic has 3 partitions) | 2 |
 | E8 | Stop inventory, keep ordering | breaker OPEN, 503 in ~35 ms, HALF_OPEN after 10 s, CLOSED again | 18 |
 | E9 | One order in Jaeger | one trace, 20 spans, 5 services, across every outbox | 19 |
 

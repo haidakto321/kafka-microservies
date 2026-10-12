@@ -204,3 +204,8 @@ Changed during the build:
 - The README has no "Status" line any more; the milestone table says what each milestone did.
 
 Final state: 6 modules, 106 tests green; the end-to-end check passes through the gateway; every URL in the README answers.
+
+Final review fixes (docs only, no code changed):
+
+- LEARNINGS: new section 22 (health probes), including what readiness does **not** check here (database, Kafka, breaker, partition assignment); section 21 got its own interview answer, so every Q&A entry is now a word-for-word copy; the contract-bug note says what really reached the wire (`100`, because the `jsonb` outbox column turns `1E+2` into `100` - checked in PostgreSQL); the "new series" metrics advice uses `offset` (both queries checked in Prometheus); the pitch no longer suggests every test uses Testcontainers.
+- README: gateway URLs that answer (`/api/products/1`, `/api/orders/{id}`), a complete `start-instance.ps1` example, and exact E5/E7 results.
