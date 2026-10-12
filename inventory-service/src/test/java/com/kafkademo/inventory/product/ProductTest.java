@@ -48,4 +48,21 @@ class ProductTest {
                 .hasMessageContaining("Not enough stock");
         assertThat(product.getStock()).isEqualTo(2);
     }
+
+    @Test
+    void increaseStockPutsItemsBack() {
+        Product product = productWithStock(2);
+
+        product.increaseStock(3);
+
+        assertThat(product.getStock()).isEqualTo(5);
+    }
+
+    @Test
+    void increaseStockRejectsZeroOrLess() {
+        Product product = productWithStock(2);
+
+        assertThatThrownBy(() -> product.increaseStock(0)).isInstanceOf(IllegalArgumentException.class);
+        assertThat(product.getStock()).isEqualTo(2);
+    }
 }

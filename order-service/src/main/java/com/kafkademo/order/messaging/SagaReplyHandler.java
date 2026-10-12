@@ -39,6 +39,8 @@ public class SagaReplyHandler {
         switch (envelope.type()) {
             case MessageTypes.STOCK_RESERVED -> saga.onStockReserved(envelope.orderId());
             case MessageTypes.STOCK_RESERVATION_FAILED -> saga.onStockReservationFailed(envelope.orderId());
+            case MessageTypes.PAYMENT_SUCCEEDED -> saga.onPaymentSucceeded(envelope.orderId());
+            case MessageTypes.PAYMENT_FAILED -> saga.onPaymentFailed(envelope.orderId());
             default -> log.warn("Ignoring unknown reply type '{}' (messageId={})", envelope.type(), envelope.messageId());
         }
     }

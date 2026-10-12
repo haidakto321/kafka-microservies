@@ -7,6 +7,7 @@ import com.kafkademo.contracts.InvalidMessageException;
 import com.kafkademo.contracts.MessageEnvelope;
 import com.kafkademo.contracts.MessageTypes;
 import com.kafkademo.contracts.Topics;
+import com.kafkademo.contracts.payload.ReleaseStock;
 import com.kafkademo.contracts.payload.ReserveStock;
 import com.kafkademo.contracts.payload.StockReservationFailed;
 import com.kafkademo.contracts.payload.StockReserved;
@@ -129,6 +130,21 @@ class InventoryCommandListenerTest {
         assertThat(products.findById(productId).orElseThrow().getStock()).isEqualTo(3);
         assertThat(jdbc.queryForObject("SELECT count(*) FROM outbox_event WHERE aggregate_id = ?", Long.class, orderId))
                 .isEqualTo(1);
+    }
+
+    @Test
+    void aReleaseStockCommandPutsTheStockBack() throws Exception {
+        long productId = newProduct(5);
+        UUID orderId = UUID.randomUUID();
+        sendCommand(orderId, MessageTypes.RESERVE_STOCK, new ReserveStock(productId, 2));
+        assertThat(awaitReply(orderId).type()).isEqualTo(MessageTypes.STOCK_RESERVED);
+
+        sendCommand(orderId, MessageTypes.RELEASE_STOCK, new ReleaseStock("PAYMENT_FAILED"));
+        UUID markerId = sendMarker(orderId); // same key: handled after the ReleaseStock
+
+        awaitProcessed(markerId);
+        assertThat(products.findById(productId).orElseThrow().getStock()).isEqualTo(5);
+        assertThat(reservations.findById(orderId).orElseThrow().getStatus()).isEqualTo(ReservationStatus.RELEASED);
     }
 
     @Test

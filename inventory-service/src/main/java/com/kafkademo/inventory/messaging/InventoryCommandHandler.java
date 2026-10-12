@@ -4,6 +4,7 @@ import com.kafkademo.contracts.EnvelopeCodec;
 import com.kafkademo.contracts.MessageEnvelope;
 import com.kafkademo.contracts.MessageTypes;
 import com.kafkademo.contracts.Topics;
+import com.kafkademo.contracts.payload.ReleaseStock;
 import com.kafkademo.contracts.payload.ReserveStock;
 import com.kafkademo.contracts.payload.StockReservationFailed;
 import com.kafkademo.contracts.payload.StockReserved;
@@ -50,6 +51,7 @@ public class InventoryCommandHandler {
         processedMessages.save(new ProcessedMessage(envelope.messageId(), clock.instant()));
         switch (envelope.type()) {
             case MessageTypes.RESERVE_STOCK -> reserveStock(envelope);
+            case MessageTypes.RELEASE_STOCK -> releaseStock(envelope);
             default -> log.warn("Ignoring unknown command type '{}' (messageId={})", envelope.type(), envelope.messageId());
         }
     }
@@ -64,5 +66,11 @@ public class InventoryCommandHandler {
             outbox.add(Topics.SAGA_REPLIES, envelope.orderId(), MessageTypes.STOCK_RESERVATION_FAILED,
                     new StockReservationFailed(command.productId(), command.quantity(), result.reason()));
         }
+    }
+
+    private void releaseStock(MessageEnvelope envelope) {
+        codec.payload(envelope, ReleaseStock.class); // checks the payload shape (InvalidMessageException if wrong)
+        stockService.release(envelope.orderId());
+        // No reply: the order is already CANCELLED (spec 5, failure 2). The outbox + retries make sure this arrives.
     }
 }

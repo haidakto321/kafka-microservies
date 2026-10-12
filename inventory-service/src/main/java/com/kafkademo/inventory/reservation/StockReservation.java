@@ -68,6 +68,15 @@ public class StockReservation implements Persistable<UUID> {
         isNew = false;
     }
 
+    /** @return false if it is not RESERVED any more (already released) - then nothing changes */
+    public boolean release() {
+        if (status != ReservationStatus.RESERVED) {
+            return false;
+        }
+        status = ReservationStatus.RELEASED;
+        return true;
+    }
+
     public UUID getOrderId() {
         return orderId;
     }

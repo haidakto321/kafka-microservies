@@ -23,17 +23,54 @@ class StockServiceTest {
     StockService stockService;
     @Autowired
     ProductRepository products;
+    @Autowired
+    StockReservationRepository reservations;
 
     /** The second guard behind the processed-message check: one reservation per order, enforced by the primary key. */
     @Test
     void aSecondReservationForTheSameOrderIsRejected() {
-        long productId = ThreadLocalRandom.current().nextLong(10_000, 1_000_000_000L);
-        products.save(new Product(productId, "Guarded", new BigDecimal("1.00"), 5));
+        long productId = newProduct(5);
         UUID orderId = UUID.randomUUID();
         stockService.reserve(orderId, productId, 1);
 
         assertThatThrownBy(() -> stockService.reserve(orderId, productId, 1))
                 .isInstanceOf(DataIntegrityViolationException.class);
         assertThat(products.findById(productId).orElseThrow().getStock()).isEqualTo(4);
+    }
+
+    @Test
+    void releasePutsTheReservedItemsBack() {
+        long productId = newProduct(5);
+        UUID orderId = UUID.randomUUID();
+        stockService.reserve(orderId, productId, 2);
+
+        assertThat(stockService.release(orderId)).isTrue();
+
+        assertThat(products.findById(productId).orElseThrow().getStock()).isEqualTo(5);
+        assertThat(reservations.findById(orderId).orElseThrow().getStatus()).isEqualTo(ReservationStatus.RELEASED);
+    }
+
+    /** Natural idempotency: only a RESERVED reservation is released, so a repeated ReleaseStock is harmless. */
+    @Test
+    void aSecondReleaseChangesNothing() {
+        long productId = newProduct(5);
+        UUID orderId = UUID.randomUUID();
+        stockService.reserve(orderId, productId, 2);
+        stockService.release(orderId);
+
+        assertThat(stockService.release(orderId)).isFalse();
+
+        assertThat(products.findById(productId).orElseThrow().getStock()).isEqualTo(5);
+    }
+
+    @Test
+    void releasingWithoutAReservationChangesNothing() {
+        assertThat(stockService.release(UUID.randomUUID())).isFalse();
+    }
+
+    private long newProduct(int stock) {
+        long id = ThreadLocalRandom.current().nextLong(10_000, 1_000_000_000L);
+        products.save(new Product(id, "Test product " + id, new BigDecimal("1.00"), stock));
+        return id;
     }
 }

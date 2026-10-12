@@ -60,4 +60,41 @@ class OrderTest {
         assertThat(order.getStatus()).isEqualTo(OrderStatus.CANCELLED);
         assertThat(order.getCancelReason()).isEqualTo(CancelReason.OUT_OF_STOCK);
     }
+
+    @Test
+    void paymentSucceededConfirmsAReservedOrder() {
+        Order order = newOrder();
+        order.markStockReserved(NOW);
+
+        assertThat(order.confirm(NOW)).isTrue();
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.CONFIRMED);
+    }
+
+    @Test
+    void onlyAReservedOrderCanBeConfirmed() {
+        Order order = newOrder();
+
+        assertThat(order.confirm(NOW)).isFalse();
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.PENDING);
+    }
+
+    @Test
+    void paymentFailedCancelsAReservedOrder() {
+        Order order = newOrder();
+        order.markStockReserved(NOW);
+
+        assertThat(order.markPaymentFailed(NOW)).isTrue();
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.CANCELLED);
+        assertThat(order.getCancelReason()).isEqualTo(CancelReason.PAYMENT_FAILED);
+    }
+
+    @Test
+    void paymentFailedIsIgnoredForAConfirmedOrder() {
+        Order order = newOrder();
+        order.markStockReserved(NOW);
+        order.confirm(NOW);
+
+        assertThat(order.markPaymentFailed(NOW)).isFalse();
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.CONFIRMED);
+    }
 }

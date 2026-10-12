@@ -8,6 +8,7 @@ import com.kafkademo.contracts.EnvelopeCodec;
 import com.kafkademo.contracts.MessageEnvelope;
 import com.kafkademo.contracts.MessageTypes;
 import com.kafkademo.contracts.Topics;
+import com.kafkademo.contracts.payload.PaymentSucceeded;
 import com.kafkademo.contracts.payload.StockReservationFailed;
 import com.kafkademo.contracts.payload.StockReserved;
 import com.kafkademo.order.IntegrationTestContainers;
@@ -89,6 +90,17 @@ class SagaReplyListenerTest {
         sendReply(orderId, MessageTypes.STOCK_RESERVED, new StockReserved(1L, 1));
 
         awaitStatus(orderId, OrderStatus.STOCK_RESERVED);
+    }
+
+    @Test
+    void aPaymentSucceededReplyOnKafkaConfirmsTheOrder() throws Exception {
+        UUID orderId = orderService.placeOrder(1L, 1).getId();
+        sendReply(orderId, MessageTypes.STOCK_RESERVED, new StockReserved(1L, 1));
+        awaitStatus(orderId, OrderStatus.STOCK_RESERVED);
+
+        sendReply(orderId, MessageTypes.PAYMENT_SUCCEEDED, new PaymentSucceeded(new BigDecimal("50.00")));
+
+        awaitStatus(orderId, OrderStatus.CONFIRMED);
     }
 
     @Test

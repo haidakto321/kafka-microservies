@@ -80,6 +80,30 @@ public class Order {
         return cancel(CancelReason.OUT_OF_STOCK, now);
     }
 
+    /**
+     * Payment went through. Only a STOCK_RESERVED order is waiting for that answer.
+     * @return false otherwise - the reply is late or a duplicate and is ignored
+     */
+    public boolean confirm(Instant now) {
+        if (status != OrderStatus.STOCK_RESERVED) {
+            return false;
+        }
+        status = OrderStatus.CONFIRMED;
+        updatedAt = now;
+        return true;
+    }
+
+    /**
+     * Payment failed. Only a STOCK_RESERVED order is waiting for that answer; the caller must give the stock back.
+     * @return false otherwise - the reply is late or a duplicate and is ignored
+     */
+    public boolean markPaymentFailed(Instant now) {
+        if (status != OrderStatus.STOCK_RESERVED) {
+            return false;
+        }
+        return cancel(CancelReason.PAYMENT_FAILED, now);
+    }
+
     /** @return false if the order is already CONFIRMED or CANCELLED */
     public boolean cancel(CancelReason reason, Instant now) {
         if (status != OrderStatus.PENDING && status != OrderStatus.STOCK_RESERVED) {

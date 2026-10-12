@@ -46,6 +46,14 @@ public class Product {
         stock -= quantity;
     }
 
+    /** Compensation: puts reserved items back. */
+    public void increaseStock(int quantity) {
+        if (quantity <= 0) {
+            throw new IllegalArgumentException("Quantity must be positive: " + quantity);
+        }
+        stock += quantity;
+    }
+
     public Long getId() {
         return id;
     }

@@ -46,4 +46,29 @@ public class StockService {
         log.info("Order {}: reserved {} of product {}, {} left", orderId, quantity, productId, product.getStock());
         return ReservationResult.success();
     }
+
+    /**
+     * Compensation (the payment failed): puts the reserved items back.
+     * Natural idempotency: only a RESERVED reservation is released, so a repeated ReleaseStock changes nothing.
+     *
+     * @return true if stock was put back
+     */
+    @Transactional
+    public boolean release(UUID orderId) {
+        Optional<StockReservation> found = reservations.findById(orderId);
+        if (found.isEmpty()) {
+            log.info("Order {}: nothing to release (no reservation)", orderId);
+            return false;
+        }
+        StockReservation reservation = found.get();
+        if (!reservation.release()) {
+            log.info("Order {}: reservation is already {}, nothing to release", orderId, reservation.getStatus());
+            return false;
+        }
+        Product product = products.findById(reservation.getProductId()).orElseThrow();
+        product.increaseStock(reservation.getQuantity());
+        log.info("Order {}: released {} of product {}, {} left", orderId, reservation.getQuantity(),
+                product.getId(), product.getStock());
+        return true;
+    }
 }

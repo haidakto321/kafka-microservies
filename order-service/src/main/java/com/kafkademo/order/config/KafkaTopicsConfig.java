@@ -25,4 +25,15 @@ public class KafkaTopicsConfig {
         // Same partition count: a failed record goes to the same partition number in the DLT.
         return TopicBuilder.name(Topics.SAGA_REPLIES_DLT).partitions(Topics.PARTITIONS).replicas(1).build();
     }
+
+    // The outbox also writes to these two. With auto-create off, a missing topic would block every row behind it.
+    @Bean
+    NewTopic paymentCommandsTopic() {
+        return TopicBuilder.name(Topics.PAYMENT_COMMANDS).partitions(Topics.PARTITIONS).replicas(1).build();
+    }
+
+    @Bean
+    NewTopic orderEventsTopic() {
+        return TopicBuilder.name(Topics.ORDER_EVENTS).partitions(Topics.PARTITIONS).replicas(1).build();
+    }
 }

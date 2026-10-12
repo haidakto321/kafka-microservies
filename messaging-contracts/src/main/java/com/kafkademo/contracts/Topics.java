@@ -19,6 +19,8 @@ public final class Topics {
     public static final String DLT_SUFFIX = ".DLT";
     public static final String INVENTORY_COMMANDS_DLT = INVENTORY_COMMANDS + DLT_SUFFIX;
     public static final String SAGA_REPLIES_DLT = SAGA_REPLIES + DLT_SUFFIX;
+    public static final String PAYMENT_COMMANDS_DLT = PAYMENT_COMMANDS + DLT_SUFFIX;
+    public static final String ORDER_EVENTS_DLT = ORDER_EVENTS + DLT_SUFFIX;
 
     /** Every topic has 3 partitions, so up to 3 consumers per group can work in parallel. */
     public static final int PARTITIONS = 3;
