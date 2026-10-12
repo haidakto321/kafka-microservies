@@ -5,7 +5,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.kafkademo.contracts.payload.ChargePayment;
 import com.kafkademo.contracts.payload.ReserveStock;
+import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -89,6 +91,21 @@ class EnvelopeCodecTest {
         assertThatThrownBy(() -> codec.payload(envelope, ReserveStock.class))
                 .isInstanceOf(InvalidMessageException.class)
                 .hasMessageContaining("no payload");
+    }
+
+    /** Money must arrive exactly as sent: 100.00, not 100.0 (read as a double) or 1E+2 (zeros stripped). */
+    @Test
+    void aMoneyAmountKeepsItsExactValueAndScale() {
+        MessageEnvelope sent = codec.wrap(MessageTypes.CHARGE_PAYMENT, UUID.randomUUID(),
+                new ChargePayment(new BigDecimal("100.00")));
+
+        MessageEnvelope received = codec.fromJson(codec.toJson(sent));
+        MessageEnvelope rebuilt = codec.envelope(UUID.randomUUID(), MessageTypes.CHARGE_PAYMENT, UUID.randomUUID(), NOW,
+                "{\"amount\": 100.00}");
+
+        // isEqualTo on BigDecimal compares the scale too.
+        assertThat(codec.payload(received, ChargePayment.class).amount()).isEqualTo(new BigDecimal("100.00"));
+        assertThat(codec.payload(rebuilt, ChargePayment.class).amount()).isEqualTo(new BigDecimal("100.00"));
     }
 
     @Test

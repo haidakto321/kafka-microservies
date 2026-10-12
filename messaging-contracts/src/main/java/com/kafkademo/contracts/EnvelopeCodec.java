@@ -1,8 +1,10 @@
 package com.kafkademo.contracts;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.cfg.JsonNodeFeature;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.UUID;
@@ -18,7 +20,12 @@ public class EnvelopeCodec {
     }
 
     public EnvelopeCodec(ObjectMapper mapper, Clock clock) {
-        this.mapper = mapper;
+        // Money must keep its exact value and scale. By default Jackson reads a decimal inside a JsonNode payload
+        // as a double (100.00 -> 100.0) and can strip zeros in trees (100.00 -> 1E+2). A copy, so the application's
+        // shared ObjectMapper is not changed.
+        this.mapper = mapper.copy()
+                .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+                .configure(JsonNodeFeature.STRIP_TRAILING_BIGDECIMAL_ZEROES, false);
         this.clock = clock;
     }
 
