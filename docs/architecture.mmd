@@ -1,0 +1,51 @@
+%%{init: {'theme':'base', 'flowchart': {'curve':'stepAfter'}, 'themeVariables': {'fontSize':'14px', 'fontFamily':'Segoe UI, Arial', 'lineColor':'#64748b', 'edgeLabelBackground':'#ffffff'}}}%%
+flowchart TB
+    CLIENT["<b>Client</b><br/>curl / scripts"]:::grey
+    GW["<b>api-gateway</b><br/>:8080 - routes /api/**"]:::blue
+
+    subgraph SVC["<b>Services</b><br/>Spring Boot, run on the host"]
+        direction LR
+        ORDER["<b>order-service</b><br/>:8081 - saga conductor"]:::blue
+        INV["<b>inventory-service</b><br/>:8082 - stock"]:::blue
+        PAY["<b>payment-service</b><br/>:8083 - fake payment"]:::blue
+        NOTIF["<b>notification-service</b><br/>:8084 - logs events"]:::blue
+    end
+
+    subgraph KAFKA["<b>Kafka</b><br/>KRaft, 3 partitions per topic, key = orderId"]
+        direction LR
+        IC["<b>inventory-commands</b><br/>ReserveStock, ReleaseStock"]:::amber
+        PC["<b>payment-commands</b><br/>ChargePayment"]:::amber
+        SR["<b>saga-replies</b><br/>StockReserved/Failed<br/>PaymentSucceeded/Failed"]:::amber
+        OE["<b>order-events</b><br/>OrderConfirmed, OrderCancelled"]:::amber
+        DLT["<b>topic.DLT</b><br/>failed records, one per topic"]:::amber
+    end
+
+    subgraph PG["<b>PostgreSQL</b><br/>:5433, one database per service"]
+        direction LR
+        ODB[("order_db")]:::blue
+        IDB[("inventory_db")]:::blue
+        PDB[("payment_db")]:::blue
+    end
+
+    CLIENT -->|HTTP| GW
+    GW -->|/api/orders| ORDER
+    GW -->|/api/products| INV
+    ORDER -->|REST price: timeout, retry, breaker| INV
+    ORDER ==>|outbox relay| IC
+    ORDER -->|outbox relay| PC
+    ORDER -->|outbox relay| OE
+    INV -->|outbox relay| SR
+    PAY -->|outbox relay| SR
+    IC -->|consume| INV
+    PC -->|consume| PAY
+    SR -->|consume| ORDER
+    OE -->|consume| NOTIF
+    ODB --- ORDER
+    IDB --- INV
+    PDB --- PAY
+    SVC -.->|after 3 retries, or bad input at once| DLT
+
+    classDef grey stroke:#64748b,fill:#f1f5f9,stroke-width:2px,color:#0f172a
+    classDef blue stroke:#3b82f6,fill:#eff6ff,stroke-width:2px,color:#1e3a8a
+    classDef amber stroke:#f59e0b,fill:#fffbeb,stroke-width:2px,color:#78350f
+    linkStyle 4 stroke:#16a34a,stroke-width:3px

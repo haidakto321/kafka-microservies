@@ -23,6 +23,10 @@ spring:
                 - StripPrefix=1
 
 management:
+  endpoint:
+    health:
+      probes:
+        enabled: true                 # /actuator/health/liveness and /readiness (spec 7.4); automatic only on Kubernetes
   endpoints:
     web:
       exposure:

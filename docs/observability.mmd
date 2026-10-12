@@ -1,0 +1,26 @@
+%%{init: {'theme':'base', 'flowchart': {'curve':'stepAfter'}, 'themeVariables': {'fontSize':'14px', 'fontFamily':'Segoe UI, Arial', 'lineColor':'#64748b', 'edgeLabelBackground':'#ffffff'}}}%%
+flowchart LR
+    subgraph APPS["<b>The 5 services</b><br/>api-gateway, order, inventory, payment, notification"]
+        ACT["<b>/actuator/prometheus</b><br/>Micrometer metrics"]:::blue
+        OTEL["<b>Micrometer Tracing</b><br/>OpenTelemetry bridge"]:::blue
+    end
+    JAEGER["<b>Jaeger</b><br/>:16686 traces"]:::teal
+    PROM["<b>Prometheus</b><br/>:9090 metrics"]:::teal
+    GRAF["<b>Grafana</b><br/>:3000 dashboard kafka-demo"]:::teal
+    KAFKA["<b>Kafka</b><br/>:9092"]:::amber
+    CONSOLE["<b>Redpanda Console</b><br/>:8090 Kafka UI"]:::teal
+    YOU["<b>You</b><br/>browser"]:::grey
+
+    OTEL ==>|OTLP spans :4318| JAEGER
+    PROM -->|scrape every 5 s| ACT
+    GRAF -->|PromQL| PROM
+    CONSOLE -->|topics, lag, produce| KAFKA
+    YOU --> JAEGER
+    YOU --> GRAF
+    YOU --> CONSOLE
+
+    classDef grey stroke:#64748b,fill:#f1f5f9,stroke-width:2px,color:#0f172a
+    classDef blue stroke:#3b82f6,fill:#eff6ff,stroke-width:2px,color:#1e3a8a
+    classDef teal stroke:#14b8a6,fill:#f0fdfa,stroke-width:2px,color:#134e4a
+    classDef amber stroke:#f59e0b,fill:#fffbeb,stroke-width:2px,color:#78350f
+    linkStyle 0 stroke:#16a34a,stroke-width:3px

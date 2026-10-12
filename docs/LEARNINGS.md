@@ -7,7 +7,36 @@ every topic:
 4. **What I saw** (from my experiments) 5. **Interview answer**
 6. **Common follow-up questions**
 
-The "Interview answer" parts are collected again at the end (added in M5).
+The "Interview answer" parts are collected in [Interview Q&A](#interview-qa); a
+2-minute project pitch and the next steps follow it.
+
+## Contents
+
+- [1. Kafka basics](#1-kafka-basics)
+- [2. Ordering and keys (experiment E7)](#2-ordering-and-keys-experiment-e7)
+- [3. Scaling consumers with consumer groups (experiment E5)](#3-scaling-consumers-with-consumer-groups-experiment-e5)
+- [4. The dual-write problem (why M2 needs the outbox)](#4-the-dual-write-problem-why-m2-needs-the-outbox)
+- [5. A broken message in M1 (preview of M2's dead-letter topic)](#5-a-broken-message-in-m1-preview-of-m2s-dead-letter-topic)
+- [6. Testcontainers and kafka-native](#6-testcontainers-and-kafka-native)
+- [7. Delivery guarantees](#7-delivery-guarantees)
+- [8. The outbox pattern](#8-the-outbox-pattern)
+- [9. The idempotent consumer](#9-the-idempotent-consumer)
+- [10. Retries, poison messages and the dead-letter topic](#10-retries-poison-messages-and-the-dead-letter-topic)
+- [11. Consumer lag (experiment E6)](#11-consumer-lag-experiment-e6)
+- [12. Flyway and database per service](#12-flyway-and-database-per-service)
+- [13. The saga (orchestration) and compensation](#13-the-saga-orchestration-and-compensation)
+- [14. The asynchronous API (202 + polling)](#14-the-asynchronous-api-202--polling)
+- [15. Fan-out and when idempotency is not needed](#15-fan-out-and-when-idempotency-is-not-needed)
+- [16. Shared message contracts - the trade-off](#16-shared-message-contracts---the-trade-off)
+- [17. The API gateway](#17-the-api-gateway)
+- [18. Timeout, retry and circuit breaker (Resilience4j)](#18-timeout-retry-and-circuit-breaker-resilience4j)
+- [19. Tracing - Micrometer Tracing, OpenTelemetry, Jaeger](#19-tracing---micrometer-tracing-opentelemetry-jaeger)
+- [20. Metrics - Prometheus and Grafana](#20-metrics---prometheus-and-grafana)
+- [21. Traces vs metrics vs logs](#21-traces-vs-metrics-vs-logs)
+- [Interview Q&A](#interview-qa)
+- [2-minute pitch](#2-minute-pitch)
+- [Next steps](#next-steps)
+- [Glossary](#glossary)
 
 ---
 
@@ -529,12 +558,14 @@ section 4).
     INSERT outbox_event (the reply)                     ]  -> commit
 ```
 
-- Code: `InventoryCommandHandler`, `SagaReplyHandler`. The listeners only read
-  the record and call the handler.
+- Code: `InventoryCommandHandler`, `SagaReplyHandler`, `PaymentCommandHandler`.
+  The listeners only read the record and call the handler.
 - Everything is one commit: if the work fails, the `processed_message` row is
   rolled back too, so a retry is not wrongly skipped.
-- Two copies at the same moment: both pass the check, but the second INSERT hits
-  the primary key and rolls back; its retry then skips.
+- Two copies at the same moment (it can happen during a rebalance, while the old
+  owner of the partition is still working): both pass the check, but the second
+  INSERT hits the primary key and rolls back; the error handler retries it after
+  1 s, and then it skips.
 - **Natural idempotency** as a second guard: one reservation per order. The
   reservation is insert-only (`Persistable.isNew()`), so a second one fails on the
   primary key instead of overwriting the first.
@@ -599,8 +630,9 @@ never succeed are not retried.
 
 - `config/KafkaErrorHandlingConfig` (one bean per service; Spring Boot plugs it
   into every `@KafkaListener`):
-  - `InvalidMessageException` (bad JSON, missing fields, wrong payload) -> **not
-    retryable** -> straight to `<topic>.DLT`.
+  - `InvalidMessageException` (bad JSON, missing fields, wrong payload, or a
+    record with a null value - a "tombstone") -> **not retryable** -> straight to
+    `<topic>.DLT`.
   - anything else -> 3 retries after 1 s, 2 s, 4 s -> `<topic>.DLT`.
 - The DLT gets the record **unchanged**, plus 10 headers (see E2).
 - The DLT name is set **explicitly** (`<topic>.DLT`). Spring Kafka 3.3's own
@@ -610,9 +642,10 @@ never succeed are not retried.
   wait. That keeps the messages of one order in order. `@RetryableTopic` (retry
   topics) does not block, but a later message of the same order can overtake the
   retried one - wrong for a saga.
-- Optimistic-lock conflicts (E5 in M1) are retried right away inside the listener,
-  3 times, so a valid command does not end up in the DLT just because another
-  instance was faster.
+- Optimistic-lock conflicts (E5 in M1) are tried again right away inside the
+  listener - 3 attempts (2 retries) - so a valid command does not end up in the
+  DLT just because another instance was faster. Worst case before the DLT: 4
+  deliveries x 3 attempts = 12 tries.
 - No `ErrorHandlingDeserializer` here: values are read as plain strings, which
   cannot fail. You need it when Kafka's own deserializer parses JSON or Avro -
   otherwise a broken record fails **before** your code runs and can block the
@@ -692,7 +725,7 @@ Consumer Groups shows the lag per partition (and its API,
 
   | Time | Lag (sum of 3 partitions) |
   |---|---|
-  | 23:36:50 (still sending) | 332 |
+  | about 23:36:50 (still sending) | 332 |
   | 23:37:54 | 167 |
   | 23:38:04 | 120 |
   | 23:38:14 | 74 |
@@ -724,11 +757,12 @@ Consumer Groups shows the lag per partition (and its API,
   file that already ran must never change - a change is a new `V<n>` file. M2
   added `V3` to inventory and `V2` to order (seen in the logs: `Successfully
   applied 1 migration ... now at version v3`).
-- **Database per service**: order, inventory (and payment in M3) each own a
+- **Database per service**: order, inventory and payment each own a
   database and never read each other's tables. They share data only through
   Kafka messages and the REST price call. That is why each service has its own
   `outbox_event` and `processed_message` tables, and its own copy of the small
-  outbox classes.
+  outbox classes. The cost of the copies: a fix must be made in each copy, and
+  copies can drift apart over time.
 
 ---
 
@@ -766,7 +800,7 @@ CANCELLED    --ReleaseStock-------------->  inventory: put the stock back   (onl
   and writes the next message to the outbox **in the same transaction**.
 - A reply that does not fit the state (late or duplicate) is ignored and sends
   nothing - e.g. `PaymentFailed` for a `CONFIRMED` order.
-- Compensation (`ReleaseStock`) is fire-and-forget, as in the spec: no
+- Compensation (`ReleaseStock`) is fire-and-forget, as in the spec's topic table: no
   `StockReleased` reply. The outbox and the retries make sure it arrives; the
   release is naturally idempotent (only a `RESERVED` reservation is released).
 - **Orchestration vs choreography:** here one service (order) tells the others
@@ -789,7 +823,8 @@ CANCELLED    --ReleaseStock-------------->  inventory: put the stock back   (onl
   | Sold-out mug | `CANCELLED / OUT_OF_STOCK` | 492 ms / 374 ms |
 
   The Laptop order, followed through all four logs (partition 0 in every topic -
-  same key):
+  only because every topic has 3 partitions and the key hashes the same way;
+  partition numbers in different topics are otherwise unrelated):
 
   ```
   16.155 order         placed, total 1500.00
@@ -837,6 +872,10 @@ CANCELLED    --ReleaseStock-------------->  inventory: put the stock back   (onl
 - *"How do you make it faster?"* - Here the relay's 500 ms poll is most of the
   time. Poll more often, or publish right after the commit and keep the poll as
   a safety net, or use CDC.
+- *"What if a step never answers?"* - Here nothing ends it: a `ChargePayment`
+  stuck in the DLT leaves the order in `STOCK_RESERVED` and the stock held
+  forever. The usual fix is a **saga timeout**: a scheduled job finds orders
+  waiting too long, cancels them and sends the compensation.
 
 ---
 
@@ -884,8 +923,14 @@ about 0.4 s for a 2-hop order (the mug), about 1-1.4 s for a 4-hop order
   analytics service, an e-mail service) needs no change in order-service.
 - notification-service is **not idempotent** on purpose: a duplicate
   `OrderConfirmed` gives a duplicate log line - harmless. A duplicate charge is
-  not harmless, so payment-service is idempotent twice over (processed-message
-  table + one payment per order). Choose per consumer.
+  not harmless, so payment-service is duplicate-safe twice over: the
+  processed-message table skips a resent message, and the primary key allows one
+  payment per order. (A second `ChargePayment` with a **new** messageId is not
+  skipped silently - it fails on the primary key, is retried, then goes to the
+  DLT.) Choose per consumer.
+- `order-events.DLT` is per **topic**, not per consumer group. With several groups
+  reading `order-events`, their failures would mix in one DLT, and replaying it
+  would deliver to every group again. A common pattern is `<topic>.<group>.DLT`.
 
 ---
 
@@ -898,9 +943,10 @@ Teams often keep their own copy of the message classes, or use a **schema
 registry** (Avro / JSON Schema / Protobuf) that checks every change stays
 compatible.
 
-**A contract bug I hit in M3:** money read back from a message lost its scale -
-`100.00` came out as `100.0`, because Jackson reads a decimal inside a `JsonNode`
-as a `double`. Doubles can also lose precision for money. The fix lives in one
+**A contract bug I hit in M3:** money lost its scale on both sides. When sending,
+Jackson stripped the zeros (`"amount":1E+2` on the wire - Redpanda Console or a
+non-Java consumer would see that); when reading, it read a decimal inside a
+`JsonNode` as a `double`, so `100.00` came back as `100.0`. Doubles can also lose precision for money. The fix lives in one
 place, the shared `EnvelopeCodec`: read decimals as `BigDecimal` and keep their
 trailing zeros. A shared module made the fix easy; with copied classes every
 team would have to find and fix it.
@@ -1132,7 +1178,8 @@ apps are hard to join. A trace shows the whole path, with times, in one picture.
 - What I did: placed one Keyboard order through the gateway, took the trace id
   from the order-service log line, opened it in Jaeger
   (`/api/v3/traces/<id>` - Jaeger 2.x's query API).
-- What I saw: **one trace, 20 spans, all 5 services, 3.4 s**:
+- What I saw: **one trace, 20 spans, all 5 services, 3.4 s** (15 of the 20 spans
+  below; each "outbox publish" span is a child of the span that wrote its row):
 
   ```
       0 ms  api-gateway          http post                      297 ms
@@ -1231,7 +1278,8 @@ alerts. A dashboard shows the health of all services on one screen.
   counted 8 responses with status 503. The `status="503"` series did not exist
   before the outage, so its first value (8) is never seen as an increase -
   `rate()` and `increase()` need two samples of the **same** series. Systems that
-  care pre-create such series at 0, or alert on the total instead.
+  care pre-create such series at 0, or compare the counter with its value a few
+  minutes ago (`max_over_time`, `absent()` patterns) instead of using `rate()`.
 
 ### Interview answer
 
@@ -1253,6 +1301,171 @@ alerts. A dashboard shows the health of all services on one screen.
 Usual flow: a metric or alert says something is wrong -> a trace shows which
 service and step -> the logs of that step (found by trace id) show the details.
 Central log storage (ELK, Loki) is out of scope here.
+
+---
+
+## Interview Q&A
+
+Every answer below is the "Interview answer" of its section, copied word for word.
+Say it in your own words; the section has the follow-up questions.
+
+**Q: What is Kafka?** (section 1)
+
+> "Kafka is a distributed, durable log. Producers write messages to topics;
+> topics are split into partitions, which are ordered and let consumers work in
+> parallel. Consumers in the same group share the partitions, so each message is
+> handled by one consumer of the group, and different groups each get every
+> message. Messages stay for the retention period, so they can be read again."
+
+**Q: How does Kafka keep messages in order?** (section 2)
+
+> "Kafka only guarantees order within a partition. So I give related messages
+> the same key - here the order id - and they all go to the same partition and
+> are processed in order. Different orders can still be processed in parallel."
+
+**Q: How do you scale Kafka consumers?** (section 3)
+
+> "Consumers with the same group id share a topic's partitions - one partition
+> per consumer. To scale, you add instances, up to the number of partitions;
+> extra consumers stay idle. When a consumer joins or leaves, Kafka rebalances
+> the partitions, and processing pauses briefly. If a consumer crashes instead
+> of shutting down cleanly, its partitions wait for the session timeout before
+> they're reassigned."
+
+**Q: What is the dual-write problem?** (section 4)
+
+> "Saving to the database and publishing to Kafka are two writes, and a crash
+> between them leaves the system inconsistent. The outbox pattern fixes it: write
+> the business change and the message into the same database transaction, and a
+> separate process publishes the message afterwards."
+
+**Q: At-most-once, at-least-once, exactly-once - which do you use?** (section 7)
+
+> "Kafka gives at-least-once if you commit after processing. Exactly-once in
+> Kafka only covers reading from and writing to Kafka. As soon as a database is
+> involved, I use at-least-once with an idempotent consumer, and the outbox
+> pattern on the sending side."
+
+**Q: What is the outbox pattern?** (section 8)
+
+> "I write the event into an outbox table in the same transaction as the
+> business data, and a relay publishes it afterwards. Nothing is lost if Kafka is
+> down, and nothing is sent for a rolled-back transaction. The relay can send a
+> row twice, so consumers must be idempotent - the row id is the message id."
+
+**Q: How do you make a consumer idempotent?** (section 9)
+
+> "I store the message id in a processed-messages table in the same transaction
+> as the business change. A redelivered message finds its id and is skipped. I
+> also use natural keys - one reservation per order - as a second guard."
+
+**Q: How do you handle messages that keep failing?** (section 10)
+
+> "I use Spring Kafka's DefaultErrorHandler with exponential back-off and a
+> dead-letter topic. Errors that can never succeed, like bad JSON, are marked not
+> retryable and go to the DLT at once. Retries block the partition, which keeps
+> per-key ordering; non-blocking retry topics would break it."
+
+**Q: What is consumer lag?** (section 11)
+
+> "Lag is the gap between the newest offset and the group's committed offset. I
+> watch it per partition; if it keeps growing I add consumers, up to the number
+> of partitions, or make processing faster."
+
+**Q: What is a saga?** (section 13)
+
+> "A saga is a chain of local transactions, one per service, connected by
+> messages. When a step fails, the earlier steps are undone by compensating
+> commands - here, payment fails and the order service sends ReleaseStock. I used
+> orchestration: the order service is the conductor, so the whole flow is in one
+> place. Every step goes through an outbox, and every consumer that changes data
+> is idempotent - the notification log, on purpose, is not."
+
+**Q: Why does your API return 202?** (section 14)
+
+> "For a long, multi-service action the API returns 202 with an id and the
+> client polls a status endpoint - or gets a callback or push. The request is
+> fast and does not depend on every service being up."
+
+**Q: What is an API gateway?** (section 17)
+
+> "An API gateway is the single entry point: it routes requests to the services
+> and handles cross-cutting concerns like logging, auth and rate limiting in one
+> place. I used Spring Cloud Gateway - a separate reactive Spring Boot app on
+> Netty - with configured routes and one custom global filter for access logs."
+
+**Q: How do you protect a call to another service?** (section 18)
+
+> "I protect the synchronous call with a 2-second timeout, a retry with only 3
+> attempts for real outages, and a circuit breaker. When the breaker is open the
+> call fails fast with a 503 instead of hanging - that stops a slow service from
+> taking the caller down with it. In Resilience4j the default order is retry
+> outside the breaker, so every attempt counts."
+
+**Q: How does distributed tracing work?** (section 19)
+
+> "I use Micrometer Tracing with the OpenTelemetry bridge and send spans over
+> OTLP to Jaeger. The trace id travels in the traceparent header over HTTP and in
+> Kafka record headers. The outbox breaks the trace because the relay sends the
+> message later, so I store the traceparent in the outbox row and continue it
+> when the relay publishes."
+
+**Q: How do you monitor the services?** (section 20)
+
+> "Each service exposes Micrometer metrics on /actuator/prometheus; Prometheus
+> scrapes them every few seconds; Grafana shows dashboards with PromQL queries -
+> request rate, p95 latency, errors, Kafka consumer lag, circuit breaker state,
+> and a custom gauge for outbox rows waiting."
+
+**Q: Traces, metrics or logs - when do you use which?** (section 21)
+
+> "Metrics tell me that something is wrong and how much - they are cheap and
+> drive the alerts. A trace shows where one request was slow or failed across the
+> services. Logs give the details of that step, and I find them by the trace id
+> that is in every log line."
+
+---
+
+## 2-minute pitch
+
+> "In my free time I built a learning project to go deeper into Kafka and
+> microservice patterns. It is five Spring Boot services - an API gateway, order,
+> inventory, payment and notification - that run an order through an
+> orchestrated saga over Kafka. The order service is the conductor: it reserves
+> stock, charges the payment, and if the payment fails it sends a compensating
+> command that puts the stock back.
+>
+> I focused on the problems you meet in real systems. Saving to the database and
+> publishing to Kafka are two writes, so I used the transactional outbox. Kafka
+> delivers at least once, so every consumer that changes data skips duplicates by
+> message id. Broken messages go to a dead-letter topic instead of blocking a
+> partition. The synchronous price call has a timeout, retries and a circuit
+> breaker. And I made one trace run across HTTP, Kafka and even the outbox, with
+> OpenTelemetry and Jaeger, plus Prometheus metrics and a Grafana dashboard.
+>
+> I did not just build it - I tested each part. With Kafka stopped, orders were
+> still accepted in about 20 milliseconds and sent when Kafka came back. When I
+> killed a service after its commit, the message was delivered again and skipped as
+> a duplicate. With the inventory service down, the breaker opened and answered in
+> about 35 milliseconds. One order is one trace of 20 spans across all five
+> services. There are 106 automated tests with Testcontainers.
+>
+> Next I would replace the polling relay with change data capture, add saga
+> timeouts, and deploy it on Kubernetes - the health probes are already there."
+
+---
+
+## Next steps
+
+- **Debezium / CDC** instead of the polling relay: read the database log and publish
+  outbox rows with no polling delay (most of the latency in section 13).
+- **A choreography version** of the saga, to compare with orchestration.
+- **RabbitMQ** for the same flow, to compare queues with Kafka's log.
+- **Saga timeouts**: cancel and compensate orders stuck in a state (section 13).
+- **Login at the gateway** (OAuth2 / Keycloak, the gateway as resource server).
+- **AWS deployment** (MSK, RDS, ECS) and **Kubernetes** (the liveness/readiness
+  probes are ready).
+- The small deferred review items listed per milestone in `docs/implementation-notes.md`.
 
 ---
 
@@ -1314,8 +1527,3 @@ Central log storage (ELK, Loki) is out of scope here.
 | Grafana | Dashboards over data sources like Prometheus |
 | Panel | One chart on a Grafana dashboard |
 
----
-
-## Coming in the next milestones
-
-- M5: interview Q&A collected from every section, and next steps.

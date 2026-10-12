@@ -1,0 +1,38 @@
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant G as api-gateway
+    participant O as order-service
+    participant I as inventory-service
+    participant P as payment-service
+    participant N as notification-service
+
+    C->>G: POST /api/orders
+    G->>O: POST /orders
+    O->>I: GET /products/{id} (price)
+    I-->>O: 200 price
+    O-->>C: 202 PENDING (order + ReserveStock saved in one transaction)
+    O-)I: ReserveStock (outbox -> inventory-commands)
+    alt enough stock
+        I-)O: StockReserved (saga-replies)
+        O-)P: ChargePayment (payment-commands)
+        alt total <= 1,000
+            P-)O: PaymentSucceeded
+            Note over O: CONFIRMED
+            O-)N: OrderConfirmed (order-events)
+        else total > 1,000 (Laptop)
+            P-)O: PaymentFailed
+            Note over O: CANCELLED / PAYMENT_FAILED
+            O-)I: ReleaseStock (compensation)
+            O-)N: OrderCancelled
+        end
+    else out of stock
+        I-)O: StockReservationFailed
+        Note over O: CANCELLED / OUT_OF_STOCK
+        O-)N: OrderCancelled
+    end
+    loop until the status is final
+        C->>G: GET /api/orders/{id}
+        G->>O: GET /orders/{id}
+        O-->>C: status
+    end

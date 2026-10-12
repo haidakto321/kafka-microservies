@@ -51,10 +51,17 @@ $verdict = if ($restored) { 'PASS' } else { 'FAIL' }
 Write-Output ("{0}  Laptop stock put back: before {1}, after {2}" -f $verdict, $laptopBefore, $laptopAfter)
 
 $log = "$root\logs\notification-service-8084.log"
-if (Test-Path $log) {
-    Start-Sleep -Seconds 1
+$skipped = -not (Test-Path $log)
+if ($skipped) {
+    Write-Output 'SKIP  notification checks (no logs\notification-service-8084.log - services not started by the scripts?)'
+} else {
     foreach ($id in $ids) {
-        $line = Select-String -Path $log -Pattern "NOTIFICATION: order $id" | Select-Object -Last 1
+        # The event goes out after the order is final, so wait for its line (up to 5 s).
+        $line = $null
+        for ($i = 0; $i -lt 25 -and -not $line; $i++) {
+            $line = Select-String -Path $log -Pattern "NOTIFICATION: order $id" | Select-Object -Last 1
+            if (-not $line) { Start-Sleep -Milliseconds 200 }
+        }
         $verdict = if ($line) { 'PASS' } else { 'FAIL' }
         if (-not $line) { $failed++ }
         $text = if ($line) { $line.Line.Substring($line.Line.IndexOf('NOTIFICATION')) } else { "no notification for $id" }
@@ -62,4 +69,4 @@ if (Test-Path $log) {
     }
 }
 if ($failed -gt 0) { throw "$failed check(s) failed" }
-Write-Output 'All checks passed.'
+if ($skipped) { Write-Output 'All checks passed (notification checks skipped).' } else { Write-Output 'All checks passed.' }

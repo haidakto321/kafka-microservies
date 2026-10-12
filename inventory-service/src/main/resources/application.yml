@@ -43,6 +43,10 @@ demo:
   processing-delay-ms: 0              # experiments E1/E6: pause after each command, before the offset commit
 
 management:
+  endpoint:
+    health:
+      probes:
+        enabled: true                 # /actuator/health/liveness and /readiness (spec 7.4); automatic only on Kubernetes
   endpoints:
     web:
       exposure:
