@@ -1,0 +1,9 @@
+# Grafana does not store metrics; it asks Prometheus (the "data source") and draws the answers.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true

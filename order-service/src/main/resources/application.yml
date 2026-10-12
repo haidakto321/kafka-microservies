@@ -34,6 +34,40 @@ spring:
 
 inventory:
   base-url: http://localhost:8082
+  timeout: 2s
+
+resilience4j:
+  retry:
+    instances:
+      inventory:
+        max-attempts: 3                 # 1 call + 2 retries
+        wait-duration: 200ms
+        retry-exceptions:               # only outages; a 404 is an answer
+          - org.springframework.web.client.ResourceAccessException
+          - org.springframework.web.client.HttpServerErrorException
+  circuitbreaker:
+    instances:
+      inventory:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10         # look at the last 10 calls
+        minimum-number-of-calls: 10     # default 100 - it would never open in a demo
+        failure-rate-threshold: 50      # open when half of them failed
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        register-health-indicator: true
+        record-exceptions:
+          - org.springframework.web.client.ResourceAccessException
+          - org.springframework.web.client.HttpServerErrorException
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,circuitbreakers
+  health:
+    circuitbreakers:
+      enabled: true
 
 logging:
   level:

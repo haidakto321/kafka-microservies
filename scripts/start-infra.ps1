@@ -1,8 +1,8 @@
-# Starts Kafka, Redpanda Console and PostgreSQL, and waits until they are ready.
+# Starts Kafka, Redpanda Console, PostgreSQL, Jaeger, Prometheus and Grafana, and waits until Kafka and PostgreSQL are ready.
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
-docker compose up -d kafka console postgres
+docker compose up -d kafka console postgres jaeger prometheus grafana
 if ($LASTEXITCODE -ne 0) { throw 'docker compose up failed - is Docker Desktop running?' }
 
 Write-Host 'Waiting for PostgreSQL...'
@@ -24,4 +24,4 @@ for ($i = 0; $i -lt 60; $i++) {
 }
 if (-not $open) { throw 'Kafka did not open port 9092' }
 
-Write-Host 'Infrastructure is up. Redpanda Console: http://localhost:8090'
+Write-Host 'Infrastructure is up. Redpanda Console http://localhost:8090 | Jaeger http://localhost:16686 | Prometheus http://localhost:9090 | Grafana http://localhost:3000'

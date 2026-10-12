@@ -54,5 +54,37 @@ services:
       timeout: 3s
       retries: 20
 
+  jaeger:
+    image: jaegertracing/jaeger:2.21.0
+    container_name: kafka-demo-jaeger
+    ports:
+      - "16686:16686"   # web UI
+      - "4317:4317"     # OTLP over gRPC
+      - "4318:4318"     # OTLP over HTTP - the services send their spans here
+
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    container_name: kafka-demo-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # the services run on the host, not in Docker
+
+  grafana:
+    image: grafana/grafana:12.4.11
+    container_name: kafka-demo-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"       # local demo: open the dashboard without logging in
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
 volumes:
   pgdata:
