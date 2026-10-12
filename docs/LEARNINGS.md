@@ -732,6 +732,174 @@ Consumer Groups shows the lag per partition (and its API,
 
 ---
 
+## 13. The saga (orchestration) and compensation
+
+### What it is
+
+A **saga** is one business action spread over several services, as a chain of
+local transactions - each service commits its own part and sends a message. If a
+later step fails, earlier steps are undone by **compensation**: a new command
+that reverses the effect (put the stock back), not a database rollback.
+
+### Why it exists
+
+Each service has its own database (section 12), so there is no single
+transaction across them. Two-phase commit (XA) would lock all of them and is
+rarely available with Kafka. A saga accepts that the system is briefly in
+between ("eventually consistent") and fixes failures with compensation.
+
+### How it works here
+
+```
+order-service (the conductor)              other services
+-----------------------------              --------------
+PENDING      --ReserveStock-------------->  inventory: reserve
+             <--StockReserved / Failed----
+STOCK_RESERVED --ChargePayment----------->  payment: total <= 1,000 ?
+             <--PaymentSucceeded / Failed-
+CONFIRMED    --OrderConfirmed------------>  notification (order-events)
+CANCELLED    --ReleaseStock-------------->  inventory: put the stock back   (only after PaymentFailed)
+             --OrderCancelled------------>  notification
+```
+
+- Code: `OrderSagaService` - one method per reply. Each moves the order one state
+  and writes the next message to the outbox **in the same transaction**.
+- A reply that does not fit the state (late or duplicate) is ignored and sends
+  nothing - e.g. `PaymentFailed` for a `CONFIRMED` order.
+- Compensation (`ReleaseStock`) is fire-and-forget, as in the spec: no
+  `StockReleased` reply. The outbox and the retries make sure it arrives; the
+  release is naturally idempotent (only a `RESERVED` reservation is released).
+- **Orchestration vs choreography:** here one service (order) tells the others
+  what to do and decides the next step - the flow is in one class, easy to follow
+  and debug. In **choreography** there is no conductor: each service reacts to
+  the others' events (inventory hears `OrderPlaced`, payment hears
+  `StockReserved`...). Fewer central parts, but the flow is spread over every
+  service and harder to see.
+
+### What I saw (end-to-end check)
+
+- What I did: `.\scripts\e2e-check.ps1` twice - a Keyboard (50), a Laptop (1,500)
+  and a sold-out mug.
+- What I saw: all 7 checks passed both times.
+
+  | Order | Final state | Time (1st run / 2nd run) |
+  |---|---|---|
+  | Keyboard | `CONFIRMED` | 3,088 ms / 1,372 ms |
+  | Laptop | `CANCELLED / PAYMENT_FAILED`, stock 10 -> 10 | 999 ms / 996 ms |
+  | Sold-out mug | `CANCELLED / OUT_OF_STOCK` | 492 ms / 374 ms |
+
+  The Laptop order, followed through all four logs (partition 0 in every topic -
+  same key):
+
+  ```
+  16.155 order         placed, total 1500.00
+  16.274 inventory     reserved 1 of product 3, 9 left
+  16.533 order         STOCK_RESERVED, ChargePayment 1500.00 sent
+  16.797 payment       payment of 1500.00 FAILED
+  17.139 order         CANCELLED (PAYMENT_FAILED), ReleaseStock sent
+  17.321 notification  NOTIFICATION: order ... cancelled (PAYMENT_FAILED)
+  17.327 inventory     released 1 of product 3, 10 left
+  ```
+- Why:
+  - Each hop takes about 250 ms: the outbox relay runs every 500 ms, so a message
+    waits 250 ms on average before it is sent. 4 hops for the Laptop = about 1 s.
+  - The Keyboard is slowest because it has the most hops (reserve, pay, confirm),
+    and the first run also warmed up the JVMs.
+  - The notification and the stock release happen **in parallel**: they are
+    different topics and different consumer groups.
+  - The order says `CANCELLED` about 0.2 s **before** the stock is back -
+    eventual consistency, accepted by the design.
+
+### Interview answer
+
+> "A saga is a chain of local transactions, one per service, connected by
+> messages. When a step fails, the earlier steps are undone by compensating
+> commands - here, payment fails and the order service sends ReleaseStock. I used
+> orchestration: the order service is the conductor, so the whole flow is in one
+> place. Every step goes through an outbox and every consumer is idempotent."
+
+### Common follow-up questions
+
+- *"Compensation vs rollback?"* - A rollback undoes an uncommitted transaction
+  in one database. Compensation is a new business action that reverses a step
+  that is **already committed** in another service.
+- *"What if the compensation fails?"* - It is retried (outbox + error handler)
+  and lands in the DLT if it never works - then someone must look. That is why
+  compensations must be idempotent and simple.
+- *"When choreography?"* - Few steps, teams that own their services and want no
+  central coordinator. When the flow grows, orchestration is easier to change.
+- *"How do you make it faster?"* - Here the relay's 500 ms poll is most of the
+  time. Poll more often, or publish right after the commit and keep the poll as
+  a safety net, or use CDC.
+
+---
+
+## 14. The asynchronous API (202 + polling)
+
+### What it is
+
+`POST /orders` answers **202 Accepted** with `status: PENDING` at once; the client
+polls `GET /orders/{id}` until the status is final.
+
+### Why it exists
+
+The saga takes several messages and services. Holding the HTTP request open for
+all of it would tie up threads and fail when any service is slow. 202 says "I
+accepted your request, the work is still running".
+
+### How it works here
+
+`OrderController` returns 202 right after the order and its `ReserveStock` are
+committed (section 8). `e2e-check.ps1` polls every 100 ms.
+
+### What I saw
+
+`POST` answers in about 20 ms (E4); the final state comes 0.4-1.4 s later (warm),
+depending on the number of hops (section 13).
+
+### Interview answer
+
+> "For a long, multi-service action the API returns 202 with an id and the
+> client polls a status endpoint - or gets a callback or push. The request is
+> fast and does not depend on every service being up."
+
+### Common follow-up questions
+
+- *"Polling wastes requests?"* - Poll with back-off, or push the result
+  (WebSocket, server-sent events, a webhook callback).
+
+---
+
+## 15. Fan-out and when idempotency is not needed
+
+- **Fan-out**: `order-events` is read by notification-service in its **own
+  consumer group**. Every group gets every message, so adding another reader (an
+  analytics service, an e-mail service) needs no change in order-service.
+- notification-service is **not idempotent** on purpose: a duplicate
+  `OrderConfirmed` gives a duplicate log line - harmless. A duplicate charge is
+  not harmless, so payment-service is idempotent twice over (processed-message
+  table + one payment per order). Choose per consumer.
+
+---
+
+## 16. Shared message contracts - the trade-off
+
+All services use the `messaging-contracts` module (topic names, message types,
+payload records). Simple for one repo and one developer. In real systems a shared
+module couples teams: a change forces everyone to rebuild and release together.
+Teams often keep their own copy of the message classes, or use a **schema
+registry** (Avro / JSON Schema / Protobuf) that checks every change stays
+compatible.
+
+**A contract bug I hit in M3:** money read back from a message lost its scale -
+`100.00` came out as `100.0`, because Jackson reads a decimal inside a `JsonNode`
+as a `double`. Doubles can also lose precision for money. The fix lives in one
+place, the shared `EnvelopeCodec`: read decimals as `BigDecimal` and keep their
+trailing zeros. A shared module made the fix easy; with copied classes every
+team would have to find and fix it.
+
+---
+
 ## Glossary
 
 | Term | Short meaning |
@@ -764,13 +932,17 @@ Consumer Groups shows the lag per partition (and its API,
 | Dead-letter topic (DLT) | Where a message goes after it failed for good |
 | Consumer lag | Messages in a partition not processed yet by the group |
 | Flyway | Runs numbered SQL migration files once, in order |
+| Saga | One business action as a chain of local transactions, one per service |
+| Orchestration | One service (the conductor) tells the others what to do next |
+| Choreography | No conductor: each service reacts to the others' events |
+| Compensation | A new command that undoes an already-committed step (here ReleaseStock) |
+| Fan-out | One topic read by several consumer groups; each gets every message |
+| 202 Accepted | "Request accepted, work still running" - the client polls for the result |
 
 ---
 
 ## Coming in the next milestones
 
-- M3: the saga - orchestration vs choreography, compensation vs rollback, async
-  API (202 + polling).
 - M4: Spring Cloud Gateway, Resilience4j, Micrometer Tracing + OpenTelemetry,
   Jaeger, Prometheus, Grafana, experiments E8 and E9.
 - M5: interview Q&A collected from every section, and next steps.

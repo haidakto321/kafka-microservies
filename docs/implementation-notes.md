@@ -125,3 +125,25 @@ Final review (fresh reviewer on the whole M2 branch):
 - The relay logged `will try again: null` for a timeout (a `TimeoutException` has no message). It now logs `e.toString()`; pinned by `OutboxRelayWarningTest`.
 - LEARNINGS sections 2 and 3 still described M1 classes and rules as current; now marked "Since M2".
 - Still open from the M1 notes: a graceful stop script (owner's decision), so E1 and every scripted stop still wait ~45 s for the session timeout.
+
+## M3
+
+Decisions made in the M3 plan (`docs/superpowers/plans/2026-10-12-m3-saga.md`):
+
+- **Compensation is fire-and-forget** (no `StockReleased` reply, as in the spec's topic table). On `PaymentFailed` the order is cancelled and `ReleaseStock` + `OrderCancelled` are written in one transaction. The order shows `CANCELLED` ~0.2 s before the stock is back.
+- **Every service declares a `NewTopic` for every topic its outbox writes to** (order-service now also creates payment-commands and order-events) - one missing topic would block the whole outbox (M2 review).
+- **payment-service copies the M2 classes** (outbox, processed message, error handler, scheduling) - database per service. No lock-conflict retry: no shared rows.
+- **Payment rule in `Payment.charge`**: `amount <= 1000.00` succeeds, more fails with `AMOUNT_OVER_LIMIT`. One payment per order, insert-only.
+- **A `ChargePayment` without an amount is invalid data** -> `InvalidMessageException` -> straight to `payment-commands.DLT`.
+- **notification-service has no database and is not idempotent** (spec 6.2), but has the shared error handler and `order-events.DLT`.
+- **`OrderSagaService` keeps one method per reply type**, each joining the handler's transaction.
+- **`scripts/e2e-check.ps1`** is the spec's end-to-end check.
+
+Changed during the build:
+
+- **Money lost its scale in messages.** `EnvelopeCodec` read decimals inside the `JsonNode` payload as `double`, so `100.00` arrived as `100.0` (and a double can lose precision for money). Found by the notification test, which expected `total 100.00`. Fixed in `EnvelopeCodec`: a copy of the mapper with `USE_BIG_DECIMAL_FOR_FLOATS` on and `STRIP_TRAILING_BIGDECIMAL_ZEROES` off. Pinned by `aMoneyAmountKeepsItsExactValueAndScale` (contracts now 11 tests).
+
+End-to-end results (details in LEARNINGS section 13):
+
+- Both runs: all 7 checks passed. Warm run: Keyboard `CONFIRMED` in 1.37 s, Laptop `CANCELLED / PAYMENT_FAILED` in 1.0 s with stock 10 -> 10, mug `CANCELLED / OUT_OF_STOCK` in 0.37 s.
+- Each saga hop costs ~250 ms, mostly the relay's 500 ms poll.

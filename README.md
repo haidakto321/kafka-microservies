@@ -8,6 +8,7 @@ What I learned: `docs/LEARNINGS.md`.
 
 M1 (Kafka basics) done: order-service and inventory-service talk through Kafka.
 M2 (reliability) done: outbox, idempotent consumers, retries and dead-letter topics.
+M3 (full saga) done: payment, compensation and notifications.
 
 ## Run it (Windows, PowerShell)
 
@@ -16,7 +17,8 @@ Requirements: Docker Desktop running, JDK 21 installed at
 
 ```powershell
 .\scripts\start-infra.ps1        # Kafka, Redpanda Console, PostgreSQL
-.\scripts\start-services.ps1     # builds and starts order + inventory
+.\scripts\start-services.ps1     # builds and starts order, inventory, payment, notification
+.\scripts\e2e-check.ps1          # happy path + both failures, end to end
 .\scripts\send-orders.ps1 -ProductId 1 -Quantity 2
 Invoke-RestMethod http://localhost:8081/orders/<id>
 .\scripts\stop-services.ps1
@@ -34,6 +36,8 @@ Experiments (see `docs/LEARNINGS.md` for what each one shows):
 |---|---|
 | order-service | http://localhost:8081 |
 | inventory-service | http://localhost:8082 |
+| payment-service | http://localhost:8083 |
+| notification-service | http://localhost:8084 (logs only) |
 | Redpanda Console (Kafka UI) | http://localhost:8090 |
 | PostgreSQL | localhost:5433, user `demo`, password `demo` |
 
