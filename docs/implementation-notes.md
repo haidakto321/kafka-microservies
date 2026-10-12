@@ -145,5 +145,5 @@ Changed during the build:
 
 End-to-end results (details in LEARNINGS section 13):
 
-- Both runs: all 7 checks passed. Warm run: Keyboard `CONFIRMED` in 1.37 s, Laptop `CANCELLED / PAYMENT_FAILED` in 1.0 s with stock 10 -> 10, mug `CANCELLED / OUT_OF_STOCK` in 0.37 s.
+- Both runs: all 7 checks passed. Warm run: Keyboard `CONFIRMED` in 1.37 s, Laptop `CANCELLED / PAYMENT_FAILED` in 1.0 s with stock 10 -> 10, mug `CANCELLED / OUT_OF_STOCK` in 0.37 s. Keyboard and Laptop both take 4 hops to their final state; the gap is where each hop lands in the 500 ms relay cycle (final review corrected an earlier "more hops" explanation).
 - Each saga hop costs ~250 ms, mostly the relay's 500 ms poll.

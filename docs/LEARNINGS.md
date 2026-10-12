@@ -803,8 +803,13 @@ CANCELLED    --ReleaseStock-------------->  inventory: put the stock back   (onl
 - Why:
   - Each hop takes about 250 ms: the outbox relay runs every 500 ms, so a message
     waits 250 ms on average before it is sent. 4 hops for the Laptop = about 1 s.
-  - The Keyboard is slowest because it has the most hops (reserve, pay, confirm),
-    and the first run also warmed up the JVMs.
+  - Keyboard and Laptop both need **4 hops** to their final state (ReserveStock,
+    StockReserved, ChargePayment, PaymentSucceeded/Failed). `OrderConfirmed` /
+    `OrderCancelled` go out **after** the order is final, so the client sees the
+    result before the notification fan-out happens. The warm-run gap (1.37 s vs
+    1.0 s) is luck: where each hop lands in the relay's 500 ms cycle (0-500 ms
+    wait per hop). The cold 3.1 s is JVM warm-up. The mug needs only 2 hops, so
+    about half.
   - The notification and the stock release happen **in parallel**: they are
     different topics and different consumer groups.
   - The order says `CANCELLED` about 0.2 s **before** the stock is back -
@@ -816,7 +821,8 @@ CANCELLED    --ReleaseStock-------------->  inventory: put the stock back   (onl
 > messages. When a step fails, the earlier steps are undone by compensating
 > commands - here, payment fails and the order service sends ReleaseStock. I used
 > orchestration: the order service is the conductor, so the whole flow is in one
-> place. Every step goes through an outbox and every consumer is idempotent."
+> place. Every step goes through an outbox, and every consumer that changes data
+> is idempotent - the notification log, on purpose, is not."
 
 ### Common follow-up questions
 
@@ -854,8 +860,9 @@ committed (section 8). `e2e-check.ps1` polls every 100 ms.
 
 ### What I saw
 
-`POST` answers in about 20 ms (E4); the final state comes 0.4-1.4 s later (warm),
-depending on the number of hops (section 13).
+`POST` answers in about 20 ms (E4); the final state comes 0.4-1.4 s later (warm):
+about 0.4 s for a 2-hop order (the mug), about 1-1.4 s for a 4-hop order
+(section 13).
 
 ### Interview answer
 
